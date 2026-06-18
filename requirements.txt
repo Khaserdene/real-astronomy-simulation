@@ -1,0 +1,12 @@
+# Python 3.10 (Taichi 1.7.x). Install into a venv:
+#   py -3.10 -m venv .venv
+#   .venv/Scripts/python.exe -m pip install -r requirements.txt
+taichi>=1.7,<1.8
+numpy
+h5py
+astropy
+pynvml
+psutil
+pyyaml
+matplotlib
+# Blender (4.x) is installed separately, not via pip.

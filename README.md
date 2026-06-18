@@ -7,11 +7,14 @@ RTX 4070 SUPER) but resolution-scalable via config — not locked to any one mac
 See [`plan`](../../../.claude/plans/virtual-soaring-lampson.md) for the full
 roadmap. Status: **Phase 1 complete** (headless N-body core).
 
+**New here? Read [GUIDE.md](GUIDE.md)** — step-by-step usage (setup, running every
+scenario, the editor, and rendering), with copy-paste commands.
+
 ## Setup
 
 ```bash
 py -3.10 -m venv .venv
-.venv/Scripts/python.exe -m pip install taichi numpy h5py astropy pynvml pyyaml matplotlib
+.venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
 Requires a CUDA GPU (falls back to `--arch cpu`). Python 3.10 (Taichi 1.7.x).
