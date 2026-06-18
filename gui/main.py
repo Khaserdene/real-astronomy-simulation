@@ -13,19 +13,28 @@ import argparse
 import os
 import sys
 
-from PyQt6.QtCore import QTimer, Qt
+import numpy as np
+
+from PyQt6.QtCore import QTimer, Qt, QObject, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
     QComboBox, QSpinBox, QPushButton, QLabel, QSlider, QCheckBox, QFormLayout,
-    QFileDialog,
+    QFileDialog, QMessageBox, QProgressBar,
 )
 
 from core.engine import init_taichi
 from core.scenarios import SCENARIOS
 from core.sim_controller import SimController
 
-_N_PRESETS = {"Preview (5k)": 5000, "Low (10k)": 10000,
-              "Medium (20k)": 20000, "High (40k)": 40000}
+# Quick-pick particle counts (the spin box accepts any value in between).
+_N_PRESETS = [("5k", 5000), ("10k", 10000), ("20k", 20000),
+              ("40k", 40000), ("100k", 100000)]
+_N_MIN, _N_MAX, _N_DEFAULT = 100, 2_000_000, 20000
+_N_WARN = 50000  # above this, direct N^2 gravity gets slow
+
+# Brush "add" particle types -> core.state ptype codes (DM=0, star=1, gas=2).
+_PTYPE = {"Star": 1, "Gas": 2, "Dark matter": 0}
+_CLIP_KPC = 120.0  # matches sim_display: only pick what is actually drawn
 
 
 class MainWindow(QMainWindow):
@@ -37,13 +46,31 @@ class MainWindow(QMainWindow):
         self._taichi_ready = False
 
         from gui.viewport import Viewport
+        from gui.timeline import TimelineWidget
         self.viewport = Viewport()
+        self.viewport.eraseStroke.connect(self._on_erase_stroke)
+        self.viewport.addAt.connect(self._on_add_at)
+
+        top = QWidget()
+        top_row = QHBoxLayout(top)
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.addWidget(self._build_panel(), 0)
+        top_row.addWidget(self.viewport, 1)
+
+        self.timeline = TimelineWidget()
+        self.timeline.frameSelected.connect(self._show_saved_frame)
+        self.timeline.goLive.connect(self._go_live)
+        self.timeline.refreshRequested.connect(self._refresh_timeline)
 
         central = QWidget()
-        layout = QHBoxLayout(central)
-        layout.addWidget(self._build_panel(), 0)
-        layout.addWidget(self.viewport, 1)
+        layout = QVBoxLayout(central)
+        layout.addWidget(top, 1)
+        layout.addWidget(self.timeline, 0)
         self.setCentralWidget(central)
+
+        self._snap_seen = 0  # last snapshot count pushed to the timeline
+        self._busy = False   # a blocking task (render) is running off-thread
+        self._task = None    # keep a ref so the async task isn't GC'd
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -64,17 +91,43 @@ class MainWindow(QMainWindow):
         self.scenario_combo.currentIndexChanged.connect(self._on_scenario)
         self.seed_spin = QSpinBox(); self.seed_spin.setRange(0, 9999)
         self.seed_spin.setValue(7)
-        self.n_combo = QComboBox()
-        for label in _N_PRESETS:
-            self.n_combo.addItem(label)
-        self.n_combo.setCurrentText("Medium (20k)")
         sf.addRow("Scenario", self.scenario_combo)
         sf.addRow("Seed", self.seed_spin)
-        sf.addRow("Particles", self.n_combo)
+
+        # --- particle count: free spin box + quick presets ---
+        self.n_spin = QSpinBox()
+        self.n_spin.setRange(_N_MIN, _N_MAX)
+        self.n_spin.setGroupSeparatorShown(True)
+        self.n_spin.setSingleStep(1000)
+        self.n_spin.setValue(_N_DEFAULT)
+        self.n_spin.valueChanged.connect(self._update_n_warn)
+        sf.addRow("Particles", self.n_spin)
+        preset_row = QHBoxLayout()
+        for label, value in _N_PRESETS:
+            btn = QPushButton(label)
+            btn.setFixedHeight(22)
+            btn.clicked.connect(lambda _=False, val=value: self.n_spin.setValue(val))
+            preset_row.addWidget(btn)
+        sf.addRow(preset_row)
+        self.n_warn = QLabel("")
+        self.n_warn.setWordWrap(True)
+        self.n_warn.setStyleSheet("color: #c47f00; font-size: 10px;")
+        sf.addRow(self.n_warn)
+
+        # --- scenario description + details ---
         self.desc_label = QLabel(SCENARIOS["disk"].description)
         self.desc_label.setWordWrap(True)
         self.desc_label.setStyleSheet("color: gray; font-size: 11px;")
         sf.addRow(self.desc_label)
+        self.details_btn = QPushButton("Details …")
+        self.details_btn.clicked.connect(self._show_details)
+        sf.addRow(self.details_btn)
+
+        self.builder_btn = QPushButton("Scene builder… (compose objects)")
+        self.builder_btn.clicked.connect(self._on_scene_builder)
+        sf.addRow(self.builder_btn)
+
+        self._update_n_warn(self.n_spin.value())
         v.addWidget(scene_box)
 
         # --- run controls ---
@@ -92,6 +145,17 @@ class MainWindow(QMainWindow):
         self.spf_slider, spf_row = _slider("Steps/frame", 1, 20, 2)
         self.spf_slider.valueChanged.connect(self._update_spf_label)
         rv.addLayout(spf_row)
+        self.bh_check = QCheckBox("Fast gravity (Barnes-Hut) — applies on Build")
+        self.bh_check.setToolTip("Treecode O(N log N) gravity for large N "
+                                 "(gravity scenarios). Slightly approximate.")
+        self.bh_check.toggled.connect(
+            lambda c: setattr(self.ctrl.s, "gravity_mode", "bh" if c else "direct"))
+        rv.addWidget(self.bh_check)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setFormat("frame %p%")
+        rv.addWidget(self.progress)
         v.addWidget(run_box)
 
         # --- view ---
@@ -103,44 +167,72 @@ class MainWindow(QMainWindow):
         vv.addLayout(size_row)
         v.addWidget(view_box)
 
+        # --- brush (interactive particle editing) ---
+        brush_box = QGroupBox("Brush (edit particles)")
+        bf = QFormLayout(brush_box)
+        self.brush_check = QCheckBox("Enable (left-drag in viewport)")
+        self.brush_check.toggled.connect(self._on_brush_toggle)
+        bf.addRow(self.brush_check)
+        self.brush_mode_combo = QComboBox()
+        self.brush_mode_combo.addItems(["Erase", "Add"])
+        self.brush_mode_combo.currentTextChanged.connect(self._on_brush_mode)
+        bf.addRow("Mode", self.brush_mode_combo)
+        self.brush_radius_slider, br_row = _slider("Radius px", 5, 80, 25)
+        self.brush_radius_slider.valueChanged.connect(
+            lambda val: setattr(self.viewport, "brush_radius_px", float(val)))
+        bf.addRow(br_row)
+        self.add_type_combo = QComboBox()
+        self.add_type_combo.addItems(list(_PTYPE))
+        bf.addRow("Add type", self.add_type_combo)
+        self.add_count_spin = QSpinBox()
+        self.add_count_spin.setRange(10, 20000)
+        self.add_count_spin.setSingleStep(100); self.add_count_spin.setValue(500)
+        bf.addRow("Add count", self.add_count_spin)
+        from PyQt6.QtWidgets import QDoubleSpinBox
+        self.add_radius_spin = QDoubleSpinBox()
+        self.add_radius_spin.setRange(0.2, 30.0); self.add_radius_spin.setValue(3.0)
+        bf.addRow("Add radius kpc", self.add_radius_spin)
+        v.addWidget(brush_box)
+
         # --- output / checkpoints ---
         out_box = QGroupBox("Output")
         ov = QVBoxLayout(out_box)
+        self.folder_label = QLabel("")
+        self.folder_label.setWordWrap(True)
+        self.folder_label.setStyleSheet("font-size: 10px; color: gray;")
+        self._update_folder_label()
+        self.folder_btn = QPushButton("Set output folder…")
+        self.folder_btn.clicked.connect(self._on_set_folder)
+        self.open_folder_btn = QPushButton("Open simulation folder…")
+        self.open_folder_btn.clicked.connect(self._on_open_folder)
         self.autosnap_check = QCheckBox("Auto-snapshot while running")
         self.autosnap_check.toggled.connect(
             lambda c: setattr(self.ctrl.s, "auto_snapshot", c))
         self.save_btn = QPushButton("Save snapshot")
-        self.save_btn.clicked.connect(lambda: self._set_status(self.ctrl.save_snapshot()))
+        self.save_btn.clicked.connect(self._on_save)
         self.load_btn = QPushButton("Load checkpoint...")
         self.load_btn.clicked.connect(self._on_load)
+        ov.addWidget(self.folder_label)
+        ov.addWidget(self.folder_btn)
+        ov.addWidget(self.open_folder_btn)
         ov.addWidget(self.autosnap_check)
         ov.addWidget(self.save_btn)
         ov.addWidget(self.load_btn)
         v.addWidget(out_box)
 
-        # --- timeline (snapshot playback) ---
-        tl_box = QGroupBox("Timeline (saved frames)")
-        tv = QVBoxLayout(tl_box)
-        self.refresh_btn = QPushButton("Refresh frames")
-        self.refresh_btn.clicked.connect(self._refresh_frames)
-        self.timeline = QSlider(Qt.Orientation.Horizontal)
-        self.timeline.setRange(0, 0)
-        self.timeline.valueChanged.connect(self._on_timeline)
-        self.frame_label = QLabel("no frames")
-        self._frames = []
-        tv.addWidget(self.refresh_btn)
-        tv.addWidget(self.timeline)
-        tv.addWidget(self.frame_label)
-        v.addWidget(tl_box)
+        # (Snapshot playback lives in the bottom timeline bar, not here.)
 
         # --- render ---
         rbox = QGroupBox("Render (Blender)")
         rl = QVBoxLayout(rbox)
-        self.blender_btn = QPushButton("Open in Blender (interactive)")
+        self.blender_btn = QPushButton("Open in Blender (current frame)")
         self.blender_btn.clicked.connect(self._on_open_blender)
+        self.anim_btn = QPushButton("Open in Blender (animation)")
+        self.anim_btn.clicked.connect(self._on_open_blender_animation)
         self.quick_btn = QPushButton("Quick render (headless)")
         self.quick_btn.clicked.connect(self._on_quick_render)
         rl.addWidget(self.blender_btn)
+        rl.addWidget(self.anim_btn)
         rl.addWidget(self.quick_btn)
         v.addWidget(rbox)
 
@@ -162,19 +254,113 @@ class MainWindow(QMainWindow):
     def _on_scenario(self):
         name = self.scenario_combo.currentData()
         self.desc_label.setText(SCENARIOS[name].description)
+        self._update_n_warn(self.n_spin.value())
+
+    def _update_n_warn(self, n: int):
+        name = self.scenario_combo.currentData() or "disk"
+        kind = SCENARIOS[name].kind
+        if n >= _N_WARN:
+            cost = "direct N² gravity" if kind == "gravity" else "SPH neighbour search"
+            self.n_warn.setText(
+                f"⚠ {n:,} particles — {cost} may be slow at this count.")
+        else:
+            self.n_warn.setText("")
+
+    def _show_details(self):
+        name = self.scenario_combo.currentData()
+        sc = SCENARIOS[name]
+        QMessageBox.information(self, sc.label,
+                               sc.details or sc.description or "(no details)")
+
+    def _on_scene_builder(self):
+        from gui.scene_builder import SceneBuilderDialog
+        from PyQt6.QtWidgets import QDialog
+        dlg = SceneBuilderDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            spec = dlg.result_spec()
+        except ValueError as e:
+            self._set_status(f"scene error: {e}")
+            return
+        self._ensure_taichi()
+        self._set_status(self.ctrl.build_scene(spec))
+        self.timeline.follow_live()
+        self._refresh_timeline()
+        self._refresh_view()
 
     def _on_build(self):
+        # Guard: rebuilding after continuing a loaded folder with a different N
+        # cannot extend the existing frames -- offer to overwrite from scratch.
+        if self.ctrl.continuing and self.n_spin.value() != self.ctrl.s.n:
+            reply = QMessageBox.question(
+                self, "Particle count changed",
+                f"This folder's frames have N={self.ctrl.s.n:,}, but you set "
+                f"N={self.n_spin.value():,}.\n\nA new count cannot continue the "
+                "existing frames. Restart from scratch and overwrite this "
+                "folder?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if reply != QMessageBox.StandardButton.Yes:
+                self._set_status("build cancelled (N unchanged to continue)")
+                return
+            self._wipe_snapshots(self.ctrl.s.out_dir)
         self._ensure_taichi()
         self.ctrl.s.scenario = self.scenario_combo.currentData()
         self.ctrl.s.seed = self.seed_spin.value()
-        self.ctrl.s.n = _N_PRESETS[self.n_combo.currentText()]
+        self.ctrl.s.n = self.n_spin.value()
         self._set_status(self.ctrl.build())
         self.run_btn.setText("Run")
+        self.timeline.follow_live()
+        self._refresh_timeline()
         self._refresh_view()
+
+    def _on_set_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose output folder", self.ctrl.s.out_dir)
+        if folder:
+            self.ctrl.s.out_dir = folder
+            self.ctrl.continuing = False
+            self._update_folder_label()
+            self._set_status(f"output -> {folder}")
+
+    def _on_open_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Open simulation folder", self.ctrl.s.out_dir)
+        if not folder:
+            return
+        self._ensure_taichi()
+        self._set_status(self.ctrl.open_folder(folder))
+        # Reflect the resumed scene back into the controls.
+        self._sync_controls_from_ctrl()
+        self.run_btn.setText("Run")
+        self._update_folder_label()
+        self._refresh_timeline()
+        self._refresh_view()
+
+    def _sync_controls_from_ctrl(self):
+        idx = self.scenario_combo.findData(self.ctrl.s.scenario)
+        if idx >= 0:
+            self.scenario_combo.setCurrentIndex(idx)
+        self.seed_spin.setValue(self.ctrl.s.seed)
+        self.n_spin.setValue(self.ctrl.s.n)
+
+    def _update_folder_label(self):
+        self.folder_label.setText(f"folder: {self.ctrl.s.out_dir}")
+
+    def _wipe_snapshots(self, folder):
+        for p in self.ctrl.list_snapshots(folder):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
     def _on_run(self):
         self.ctrl.toggle_run()
         self.run_btn.setText("Pause" if self.ctrl.s.running else "Run")
+        if self.ctrl.s.running:
+            self.timeline.stop()            # leave playback
+            self.timeline.follow_live()     # ride the newest saved frame again
 
     def _on_step(self):
         self.ctrl.step_once(self.spf_slider.value())
@@ -183,28 +369,87 @@ class MainWindow(QMainWindow):
     def _update_spf_label(self):
         pass  # label updates itself via _slider's connection
 
+    # -------------------------------------------------------------------- brush
+    def _on_brush_toggle(self, on: bool):
+        self.viewport.brush_enabled = on
+        if on and self.ctrl.s.running:           # freeze the scene while editing
+            self.ctrl.s.running = False
+            self.run_btn.setText("Run")
+        mode = self.brush_mode_combo.currentText().lower()
+        self._set_status(f"brush ON — left-drag to {mode}" if on else "brush off")
+
+    def _on_brush_mode(self, text: str):
+        self.viewport.brush_mode = "add" if text == "Add" else "erase"
+
+    def _on_erase_stroke(self, samples, mvp, w, h, radius):
+        if self.ctrl.engine is None:
+            return
+        from gui.brush import pick_radius
+        pos = self.ctrl.engine.to_state().pos
+        within = np.linalg.norm(pos, axis=1) < _CLIP_KPC
+        mask = np.zeros(len(pos), bool)
+        for (mx, my) in samples:
+            mask |= pick_radius(pos, mvp, w, h, mx, my, radius)
+        mask &= within
+        if mask.any():
+            self._set_status(self.ctrl.edit_particles(remove_idx=np.where(mask)[0]))
+            self._refresh_view()
+
+    def _on_add_at(self, center):
+        from gui.brush import scatter_points
+        pts = scatter_points(np.asarray(center, float),
+                             self.add_count_spin.value(),
+                             self.add_radius_spin.value())
+        ptype = _PTYPE[self.add_type_combo.currentText()]
+        self._set_status(self.ctrl.edit_particles(add_pos=pts, add_ptype=ptype))
+        self._refresh_view()
+
     def _on_load(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Load checkpoint", self.ctrl.s.out_dir, "Snapshots (*.h5)")
         if path:
             self._ensure_taichi()
             self._set_status(self.ctrl.load_checkpoint(path))
+            self._sync_controls_from_ctrl()
             self.run_btn.setText("Run")
+            self._update_folder_label()
+            self._refresh_timeline()
             self._refresh_view()
 
-    def _refresh_frames(self):
-        self._frames = self.ctrl.list_snapshots()
-        self.timeline.setRange(0, max(len(self._frames) - 1, 0))
-        self.frame_label.setText(
-            f"{len(self._frames)} frames" if self._frames else "no frames")
+    def _on_save(self):
+        self._set_status(self.ctrl.save_snapshot())
+        self._refresh_timeline()
 
-    def _on_timeline(self, idx):
-        if self._frames and 0 <= idx < len(self._frames):
+    def _refresh_timeline(self):
+        frames = self.ctrl.list_snapshots()
+        self._snap_seen = len(frames)
+        self.timeline.set_frames(frames)
+
+    def _show_saved_frame(self, idx):
+        """User scrubbed/played to a saved frame -- pause live, show it."""
+        frames = self.ctrl.list_snapshots()
+        if not (0 <= idx < len(frames)):
+            return
+        if self.ctrl.s.running:
             self.ctrl.s.running = False
             self.run_btn.setText("Run")
-            pos, rgba = SimController.display_snapshot(self._frames[idx])
-            self.viewport.set_points(pos, rgba)
-            self.frame_label.setText(os.path.basename(self._frames[idx]))
+        pos, rgba = SimController.display_snapshot(frames[idx])
+        self.viewport.set_points(pos, rgba)
+
+    def _go_live(self):
+        """Playback reached the end (or 'Live' pressed) -- continue stepping."""
+        self.timeline.follow_live()
+        if self.ctrl.engine is None:
+            frames = self.ctrl.list_snapshots()
+            if frames:
+                self._ensure_taichi()
+                self._set_status(self.ctrl.open_folder(self.ctrl.s.out_dir))
+                self._sync_controls_from_ctrl()
+            else:
+                return
+        self.ctrl.s.running = True
+        self.run_btn.setText("Pause")
+        self._refresh_view()
 
     def _on_open_blender(self):
         if self.ctrl.engine is None:
@@ -221,34 +466,86 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._set_status(f"Blender error: {e}")
 
+    def _on_open_blender_animation(self):
+        """Hand the whole run's snapshot folder to Blender as an animation."""
+        frames = self.ctrl.list_snapshots()
+        if not frames:
+            self._set_status("no saved frames -- enable auto-snapshot and run, "
+                             "or Save snapshot first")
+            return
+        try:
+            from gui.blender_launcher import open_animation_in_blender
+            open_animation_in_blender(self.ctrl.s.out_dir)
+            self._set_status(f"opening {len(frames)} frames in Blender…")
+        except Exception as e:
+            self._set_status(f"Blender error: {e}")
+
     def _on_quick_render(self):
         if self.ctrl.engine is None:
             self._set_status("build/run something first")
             return
+        if self._busy:
+            self._set_status("already rendering…")
+            return
         try:
             from export.to_pointcloud import snapshot_to_ply
             from gui.blender_launcher import quick_render
+            # PLY prep is fast -> do it on the UI thread, then render off-thread.
             snap = self.ctrl.save_snapshot()
             rdir = os.path.join(self.ctrl.s.out_dir, "_quick")
             ply_dir = os.path.join(rdir, "ply")
             os.makedirs(ply_dir, exist_ok=True)
             snapshot_to_ply(snap, os.path.join(ply_dir, "frame.ply"))
-            self._set_status("rendering (blocks briefly)...")
-            QApplication.processEvents()
+        except Exception as e:
+            self._set_status(f"render prep error: {e}")
+            return
+
+        def work():
             quick_render(ply_dir, os.path.join(rdir, "render"),
                          res=900, samples=32, **{"cam-elev": 72})
-            png = os.path.join(rdir, "render", "frame.png")
-            if os.path.exists(png):
-                os.startfile(png)  # noqa: Windows
-            self._set_status("quick render done")
-        except Exception as e:
-            self._set_status(f"render error: {e}")
+            return os.path.join(rdir, "render", "frame.png")
+
+        self._set_busy(True, "rendering (Blender, off-thread)…")
+        self._task = _AsyncTask(work)
+        self._task.finished.connect(self._on_render_done)
+        self._task.start()
+
+    def _on_render_done(self, result):
+        self._set_busy(False)
+        self._task = None
+        if isinstance(result, Exception):
+            self._set_status(f"render error: {result}")
+            return
+        if result and os.path.exists(result):
+            os.startfile(result)  # noqa: Windows
+        self._set_status("quick render done")
+
+    def _set_busy(self, on: bool, text: str = ""):
+        self._busy = on
+        for b in (self.quick_btn, self.blender_btn, self.anim_btn):
+            b.setEnabled(not on)
+        if on:
+            self.progress.setRange(0, 0)        # indeterminate "busy" sweep
+            self.progress.setFormat("%p%")
+            if text:
+                self._set_status(text)
+        else:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
+            self.progress.setFormat("frame %p%")
 
     # ------------------------------------------------------------------ loop
     def _tick(self):
         if self.ctrl.s.running:
             self.ctrl.advance(self.spf_slider.value())
             self._refresh_view()
+            if not self._busy:
+                self.progress.setValue(int(self.ctrl.frame_progress() * 100))
+            # Auto-snapshotting drops new frames; let the timeline grow with them
+            # (cheap glob, only when the count actually changed).
+            if self.ctrl.s.auto_snapshot:
+                if len(self.ctrl.list_snapshots()) != self._snap_seen:
+                    self._refresh_timeline()
         self._refresh_stats()
 
     def _refresh_view(self):
@@ -269,6 +566,31 @@ class MainWindow(QMainWindow):
 
     def _set_status(self, text: str):
         self.status_label.setText(text)
+
+
+class _AsyncTask(QObject):
+    """Run a blocking callable off the UI thread; deliver result via a signal.
+
+    ``finished`` carries the callable's return value, or the ``Exception`` it
+    raised, marshalled back onto the main thread by Qt's queued connection.
+    """
+    finished = pyqtSignal(object)
+
+    def __init__(self, fn):
+        super().__init__()
+        self._fn = fn
+
+    def start(self):
+        import threading
+
+        def run():
+            try:
+                result = self._fn()
+            except Exception as e:        # report back, don't crash the thread
+                result = e
+            self.finished.emit(result)
+
+        threading.Thread(target=run, daemon=True).start()
 
 
 def _slider(label, lo, hi, val):

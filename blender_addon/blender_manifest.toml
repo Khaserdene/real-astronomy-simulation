@@ -1,0 +1,30 @@
+schema_version = "1.0.0"
+
+id = "astro_sim_importer"
+version = "0.1.0"
+name = "Astronomy Sim Importer"
+tagline = "Load galaxy / SPH simulation snapshot folders as animations"
+maintainer = "Khaserdene <baron.khaserdene@gmail.com>"
+type = "add-on"
+
+website = "https://github.com/"
+tags = ["Import-Export", "Render"]
+
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+
+# Reads the engine's snap_*.h5 directly. Blender bundles numpy, but not h5py:
+# run  python fetch_wheels.py  to download the matching h5py wheel(s) into
+# ./wheels/, then UNCOMMENT and edit the line below to match the file name(s).
+# wheels = ["./wheels/h5py-3.11.0-cp311-cp311-win_amd64.whl"]
+
+[permissions]
+files = "Read the chosen simulation folder's snapshot files"
+
+[build]
+paths_exclude_pattern = [
+    "__pycache__/",
+    "*.blend1",
+    "fetch_wheels.py",
+    "README.md",
+]

@@ -9,9 +9,17 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph.opengl as gl
+from PyQt6.QtCore import Qt, pyqtSignal
+
+from gui.brush import qmat_to_np, screen_ray_to_plane
 
 
 class Viewport(gl.GLViewWidget):
+    # erase: (screen samples [list of (x,y)], mvp 4x4, width, height, radius_px)
+    eraseStroke = pyqtSignal(object, object, int, int, float)
+    # add: a single world-space centre (3,) on the z=0 plane
+    addAt = pyqtSignal(object)
+
     def __init__(self, point_size: float = 2.5):
         super().__init__()
         self.setBackgroundColor("k")
@@ -23,6 +31,55 @@ class Viewport(gl.GLViewWidget):
         # Additive blending makes overlapping stars/gas glow like emission.
         self._scatter.setGLOptions("additive")
         self.addItem(self._scatter)
+
+        # --- brush state (off by default; the GUI toggles it) ---
+        self.brush_enabled = False
+        self.brush_mode = "erase"          # "erase" | "add"
+        self.brush_radius_px = 25.0
+        self._painting = False
+        self._erase_samples: list = []
+
+    # ----------------------------------------------------------------- brush
+    def _mvp(self) -> np.ndarray:
+        return qmat_to_np(self.projectionMatrix()) @ qmat_to_np(self.viewMatrix())
+
+    def _paint(self, ev):
+        p = ev.position()
+        if self.brush_mode == "erase":
+            self._erase_samples.append((p.x(), p.y()))
+        else:                              # add: one cluster centre per press
+            world = screen_ray_to_plane(p.x(), p.y(), self.width(),
+                                        self.height(), self._mvp(), 0.0)
+            if world is not None:
+                self.addAt.emit(world)
+
+    def mousePressEvent(self, ev):
+        if self.brush_enabled and ev.button() == Qt.MouseButton.LeftButton:
+            self._painting = True
+            self._erase_samples = []
+            self._paint(ev)
+            ev.accept()
+        else:
+            super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        if self._painting:
+            self._paint(ev)
+            ev.accept()
+        else:
+            super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        if self._painting:
+            self._painting = False
+            if self.brush_mode == "erase" and self._erase_samples:
+                self.eraseStroke.emit(list(self._erase_samples), self._mvp(),
+                                      self.width(), self.height(),
+                                      self.brush_radius_px)
+            self._erase_samples = []
+            ev.accept()
+        else:
+            super().mouseReleaseEvent(ev)
 
     def set_points(self, pos: np.ndarray, rgba: np.ndarray) -> None:
         if pos.shape[0] == 0:

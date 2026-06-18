@@ -32,8 +32,12 @@ def init_taichi(arch: str = "cuda") -> None:
 class Engine:
     """Direct-N^2 gravitational N-body engine."""
 
-    def __init__(self, softening: float = 0.05):
+    def __init__(self, softening: float = 0.05, gravity_mode: str = "direct",
+                 theta: float = 0.6):
         self.softening = float(softening)
+        self.gravity_mode = gravity_mode        # "direct" (N^2) | "bh" (treecode)
+        self.theta = float(theta)
+        self._bh = None
         self.n = 0
         self.time = 0.0
         self.step_count = 0
@@ -67,6 +71,13 @@ class Engine:
         self.pos.from_numpy(state.pos)
         self.vel.from_numpy(state.vel)
         self.mass.from_numpy(state.mass)
+        # Barnes-Hut pays off only for large N; tiny systems stay on direct N^2.
+        if self.gravity_mode == "bh" and self.n >= 256:
+            from core.solvers.barnes_hut import BarnesHut
+            self._bh = BarnesHut(self.n, theta=self.theta,
+                                 softening=self.softening)
+        else:
+            self._bh = None
         self._compute_acc()
 
     def to_state(self) -> State:
@@ -88,8 +99,11 @@ class Engine:
 
     # --------------------------------------------------------------- stepping
     def _compute_acc(self) -> None:
-        gravity.compute_acc_direct(self.pos, self.mass, self.acc, self.n,
-                                   G, self.softening ** 2)
+        if self._bh is not None:
+            self._bh.compute(self.pos, self.mass, self.acc)
+        else:
+            gravity.compute_acc_direct(self.pos, self.mass, self.acc, self.n,
+                                       G, self.softening ** 2)
 
     def step(self, dt: float) -> None:
         """Advance the system by one leapfrog (KDK) step of size ``dt``."""

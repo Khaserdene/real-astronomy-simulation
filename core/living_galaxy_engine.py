@@ -185,7 +185,15 @@ class LivingGalaxyEngine:
         self._f = {}
         self._rho_thresh = 0.0
 
-    def setup(self, pos, vel, mass, u):
+    def setup(self, pos, vel, mass, u, species=None):
+        """Initialise particles.
+
+        ``species`` (optional) sets each particle's kind in the engine's
+        convention -- 0 gas, 1 star, 2 dark matter.  When omitted every particle
+        is gas (the classic living-galaxy start, where stars form from gas).
+        Pre-existing stars are flagged as having already passed their supernova
+        so only newly *formed* stars feed back.
+        """
         n = pos.shape[0]
         self.n = n
         f = {name: ti.Vector.field(3, ti.f64, shape=n)
@@ -199,8 +207,14 @@ class LivingGalaxyEngine:
         f["vel"].from_numpy(np.ascontiguousarray(vel, np.float64))
         f["mass"].from_numpy(np.ascontiguousarray(mass, np.float64))
         f["u"].from_numpy(np.ascontiguousarray(u, np.float64))
-        for name in ("is_star", "sn_done", "exploding"):
-            f[name].from_numpy(np.zeros(n, np.int32))
+        if species is None:
+            species = np.zeros(n, np.int32)
+        else:
+            species = np.ascontiguousarray(species, np.int32)
+        f["is_star"].from_numpy(species)
+        # Stars present at t=0 are "old" -> mark their SN already done.
+        f["sn_done"].from_numpy((species == 1).astype(np.int32))
+        f["exploding"].from_numpy(np.zeros(n, np.int32))
         f["birth"].from_numpy(np.zeros(n, np.float64))
         f["h"].from_numpy(np.full(n, 0.4))
         self._density_h(20)
@@ -248,7 +262,7 @@ class LivingGalaxyEngine:
         return self._f[name].to_numpy()
 
     def star_count(self):
-        return int(self._f["is_star"].to_numpy().sum())
+        return int((self._f["is_star"].to_numpy() == 1).sum())
 
     def ages(self):
         is_star = self._f["is_star"].to_numpy()
@@ -257,10 +271,13 @@ class LivingGalaxyEngine:
 
     def to_state(self):
         """Export current state as a core.State (gas + star particle types)."""
-        from core.state import State, PTYPE_GAS, PTYPE_STAR
+        from core.state import State, PTYPE_GAS, PTYPE_STAR, PTYPE_DM
         n = self.n
         is_star = self._f["is_star"].to_numpy()
-        ptype = np.where(is_star == 1, PTYPE_STAR, PTYPE_GAS).astype(np.int32)
+        # Engine species (0 gas, 1 star, 2 DM) -> State ptype codes.
+        ptype = np.full(n, PTYPE_GAS, np.int32)
+        ptype[is_star == 1] = PTYPE_STAR
+        ptype[is_star == 2] = PTYPE_DM
         return State(
             pos=self.get("pos"), vel=self.get("vel"), mass=self.get("mass"),
             ptype=ptype, ids=np.arange(n, dtype=np.int64),

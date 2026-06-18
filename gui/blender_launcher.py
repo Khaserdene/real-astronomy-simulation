@@ -39,6 +39,20 @@ def open_in_blender(frame_dir: str) -> subprocess.Popen:
                              os.path.abspath(frame_dir)])
 
 
+def open_animation_in_blender(sim_folder: str) -> subprocess.Popen:
+    """Open Blender's GUI with the whole run loaded as an animation.
+
+    Runs ``blender_addon/loader.py`` as a startup script on a folder of
+    ``snap_*.h5`` snapshots, so every frame plays back on Blender's timeline
+    (the same loader the installed extension uses).  Needs ``h5py`` available to
+    Blender (bundle the extension wheel, or pip-install into Blender's Python).
+    """
+    blender = _require_blender()
+    script = os.path.join(_ROOT, "blender_addon", "loader.py")
+    return subprocess.Popen([blender, "--python", script, "--",
+                             os.path.abspath(sim_folder)])
+
+
 def quick_render(ply_dir: str, out_dir: str, **opts) -> str:
     """Headless-render a folder of PLYs to PNGs; returns the output folder."""
     blender = _require_blender()

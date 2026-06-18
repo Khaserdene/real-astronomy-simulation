@@ -43,6 +43,22 @@ def make_impact(n_each=6000, body_mass=0.02, body_radius=1.2,
     return pos, vel, mass, u
 
 
+def make_body(n=6000, body_mass=0.02, body_radius=1.2, cs_frac=0.7, seed=0):
+    """One self-gravitating uniform SPH sphere at the origin, at rest.
+
+    Returns (pos, vel, mass, u) in code units -- the single-object building block
+    the scene composer places (e.g. two of them = a giant impact).
+    """
+    rng = np.random.default_rng(seed)
+    pos = _uniform_sphere(rng, n, body_radius)
+    vel = np.zeros_like(pos)
+    mass = np.full(n, body_mass / n)
+    gamma = 5.0 / 3.0
+    cs = cs_frac * np.sqrt(G * body_mass / body_radius)
+    u = np.full(n, cs ** 2 / (gamma * (gamma - 1.0)))
+    return pos, vel, mass, u
+
+
 def _uniform_sphere(rng, n, radius):
     r = radius * rng.random(n) ** (1.0 / 3.0)
     cos_t = rng.uniform(-1.0, 1.0, n)

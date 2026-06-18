@@ -27,7 +27,8 @@ class Scenario:
     kind: str                 # "gravity" | "gas" | "living" | "impact"
     dt: float
     softening: float
-    description: str = ""
+    description: str = ""      # one-line summary (scenario menu)
+    details: str = ""         # multi-line: physics, what happens, params
     params: dict = field(default_factory=dict)   # GUI-tunable defaults
 
 
@@ -36,31 +37,99 @@ SCENARIOS: dict[str, Scenario] = {
     "disk": Scenario(
         "disk", "Disk galaxy", "gravity", dt=1e-4, softening=0.1,
         description="A rotating stellar disk in a dark-matter halo.",
+        details=(
+            "PHYSICS  Collisionless N-body gravity. Stars start on near-circular "
+            "orbits in an exponential disk, held together by a fixed analytic "
+            "dark-matter halo + bulge potential.\n"
+            "WHAT YOU SEE  A flat rotating spiral-like disk that winds up over "
+            "time; differential rotation shears any initial clumps into arms.\n"
+            "PARAMS  none exposed (set N and seed above)."),
         params={}),
     "merger": Scenario(
         "merger", "Galaxy merger", "gravity", dt=1e-4, softening=0.15,
         description="Two disk galaxies collide: tidal tails and bridges.",
+        details=(
+            "PHYSICS  Two collisionless disks on an approaching orbit, each in "
+            "its own moving halo potential. Tides do the rest.\n"
+            "WHAT YOU SEE  Long tidal tails, a connecting bridge, then a "
+            "disrupted merger remnant.\n"
+            "PARAMS  separation (kpc), impact_param (kpc), v_approach (km/s), "
+            "inclination (deg of the second disk)."),
         params={"separation": 50.0, "impact_param": 16.0,
                 "v_approach": 130.0, "inclination": 60.0}),
     "cosmo": Scenario(
         "cosmo", "Cosmic web", "gravity", dt=5e-5, softening=0.22,
         description="A perturbed box collapses into filaments and clumps.",
+        details=(
+            "PHYSICS  Zel'dovich-perturbed particle box under self-gravity "
+            "(gravity-only). Small density ripples grow by gravitational "
+            "instability.\n"
+            "WHAT YOU SEE  Matter drains out of voids into sheets, then "
+            "filaments, then knots — the cosmic web.\n"
+            "PARAMS  hubble (expansion rate proxy), amplitude (initial "
+            "perturbation strength)."),
         params={"hubble": 42.0, "amplitude": 1.4}),
     "plummer": Scenario(
         "plummer", "Plummer sphere", "gravity", dt=3e-5, softening=0.05,
         description="Equilibrium test sphere (energy/virial check).",
+        details=(
+            "PHYSICS  A self-gravitating Plummer sphere in equilibrium — the "
+            "standard validation case (energy conservation, virial ratio).\n"
+            "WHAT YOU SEE  A steady round cluster that should barely change; "
+            "drift here means the integrator/softening is off.\n"
+            "PARAMS  total_mass (1e10 Msun), scale_radius (kpc)."),
         params={"total_mass": 10.0, "scale_radius": 1.0}),
     "gas": Scenario(
         "gas", "Gas disk (SPH)", "gas", dt=5e-4, softening=0.2,
         description="An SPH gas disk in a galaxy potential.",
+        details=(
+            "PHYSICS  Smoothed-particle hydrodynamics (pressure, shocks, "
+            "artificial viscosity) for a gas disk orbiting in a fixed galaxy "
+            "potential, with self-gravity.\n"
+            "WHAT YOU SEE  A rotating gaseous disk that develops pressure-"
+            "supported structure, rings and shocks.\n"
+            "PARAMS  sound_speed (km/s) — sets gas 'stiffness'/temperature."),
         params={"sound_speed": 12.0}),
     "living": Scenario(
         "living", "Living galaxy", "living", dt=5e-4, softening=0.2,
         description="Gas forms stars; stars age and explode (SN feedback).",
+        details=(
+            "PHYSICS  SPH gas disk + star formation (dense gas -> stars) + "
+            "stellar ageing (age->colour) + supernova feedback that reheats "
+            "gas. Self-regulating star formation.\n"
+            "WHAT YOU SEE  Young blue stars lighting up spiral features, gas "
+            "fountains from SN, the disk slowly converting gas to stars.\n"
+            "PARAMS  sf_prob (per-step SF probability of eligible gas), du_sn "
+            "(energy injected per supernova)."),
         params={"sf_prob": 0.03, "du_sn": 500.0}),
+    "galaxy": Scenario(
+        "galaxy", "Full galaxy (stars+DM+gas)", "galaxy", dt=5e-4, softening=0.2,
+        description="A complete galaxy: stars, a live dark-matter halo and SPH "
+                    "gas, all self-gravitating together.",
+        details=(
+            "PHYSICS  Live self-gravity over ALL components — stars + a live "
+            "dark-matter halo + gas (no analytic potential) — with SPH hydro on "
+            "the gas, star formation and supernova feedback. The most physically "
+            "complete galaxy here.\n"
+            "WHAT YOU SEE  A self-consistent galaxy: a rotating stellar disk in a "
+            "responsive DM halo, cold gas forming young blue stars, supernovae "
+            "driving fountains. Dust glow is added at render from gas density.\n"
+            "PARAMS  sf_prob (star-formation rate), du_sn (SN energy). Gas/star/"
+            "DM split scales with N.\n"
+            "NOTE  Uses direct N² gravity — heavier than the split scenarios; a "
+            "Barnes-Hut tree is the planned speed-up for large N."),
+        params={"sf_prob": 0.03, "du_sn": 400.0}),
     "impact": Scenario(
         "impact", "Giant impact", "impact", dt=5e-4, softening=0.1,
         description="Two self-gravitating bodies collide (shock heating).",
+        details=(
+            "PHYSICS  Two self-gravitating SPH bodies (no external potential) "
+            "collide; the contact shock heats material (coloured by internal "
+            "energy). Planetary-scale, not galactic.\n"
+            "WHAT YOU SEE  A giant impact: shock-heated ejecta, a debris disk, "
+            "possible re-accretion — Moon-forming-impact style.\n"
+            "PARAMS  v_approach (km/s), impact_param (offset of the second "
+            "body; 0 = head-on)."),
         params={"v_approach": 30.0, "impact_param": 1.6}),
 }
 
@@ -69,8 +138,13 @@ _NO_POTENTIAL = dict(M_d=0.0, a=1.0, b=1.0, M_h=0.0, a_h=1.0)
 
 
 def build_scenario(name: str, n: int = 20000, seed: int = 0,
-                   overrides: dict | None = None):
-    """Build a scenario's engine (ICs loaded) and return (engine, dt)."""
+                   overrides: dict | None = None,
+                   gravity_mode: str = "direct", theta: float = 0.6):
+    """Build a scenario's engine (ICs loaded) and return (engine, dt).
+
+    ``gravity_mode`` (``"direct"`` | ``"bh"``) selects the gravity solver for
+    gravity-kind scenarios; ``"bh"`` is the Barnes-Hut treecode for large N.
+    """
     if name not in SCENARIOS:
         raise KeyError(f"unknown scenario '{name}'. Have: {list(SCENARIOS)}")
     sc = SCENARIOS[name]
@@ -82,7 +156,8 @@ def build_scenario(name: str, n: int = 20000, seed: int = 0,
         from core.scene import Scene, build_state
         from core.engine import Engine
         state = build_state(Scene(ic=name, seed=seed, params=p), n, "direct")
-        eng = Engine(softening=sc.softening)
+        eng = Engine(softening=sc.softening, gravity_mode=gravity_mode,
+                     theta=theta)
         eng.load_state(state)
         return eng, sc.dt
 
@@ -105,6 +180,16 @@ def build_scenario(name: str, n: int = 20000, seed: int = 0,
         eng.setup(pos, vel, mass, u)
         return eng, sc.dt
 
+    if sc.kind == "galaxy":
+        from core.ic.full_galaxy import make_full_galaxy
+        from core.living_galaxy_engine import LivingGalaxyEngine
+        pos, vel, mass, u, species = make_full_galaxy(n=n, seed=seed)
+        eng = LivingGalaxyEngine(
+            pot=dict(_NO_POTENTIAL), softening=sc.softening,   # fully live gravity
+            sf_prob=p.get("sf_prob", 0.03), du_sn=p.get("du_sn", 400.0))
+        eng.setup(pos, vel, mass, u, species=species)
+        return eng, sc.dt
+
     if sc.kind == "impact":
         from core.ic.impact import make_impact
         from core.gas_disk_engine import GasDiskEngine
@@ -119,33 +204,73 @@ def build_scenario(name: str, n: int = 20000, seed: int = 0,
     raise ValueError(f"unhandled scenario kind: {sc.kind}")
 
 
-def resume_scenario(name: str, state):
+def resume_scenario(name: str, state, spec=None):
     """Rebuild a scenario's engine from a saved State and return (engine, dt).
+
+    Engine configuration (kind, dt, softening) and tuned parameters come from
+    ``spec`` (a :class:`core.scene_spec.SceneSpec`) when available -- so a resumed
+    run keeps any values the user changed -- and otherwise fall back to the
+    scenario registry defaults (older snapshots that predate the scene spec).
 
     Gravity and gas/impact resume exactly; living-galaxy resume restores the
     star flags and ages but re-derives SPH state (a close, not bit-exact, resume).
     """
     sc = SCENARIOS.get(name)
-    if sc is None or sc.kind == "gravity":
-        from core.engine import Engine
-        eng = Engine(softening=(sc.softening if sc else 0.1))
-        eng.load_state(state)
-        return eng, (sc.dt if sc else 1e-4)
+    if spec is not None:
+        kind = spec.engine_kind
+        dt = spec.dt
+        softening = spec.softening
+        params = dict(spec.primary.params) if spec.objects else {}
+    else:
+        kind = sc.kind if sc else "gravity"
+        dt = sc.dt if sc else 1e-4
+        softening = sc.softening if sc else 0.1
+        params = {}
 
-    if sc.kind in ("gas", "impact"):
+    if kind == "gravity":
+        from core.engine import Engine
+        gmode = spec.gravity_mode if spec is not None else "direct"
+        gtheta = spec.theta if spec is not None else 0.6
+        eng = Engine(softening=softening, gravity_mode=gmode, theta=gtheta)
+        eng.load_state(state)
+        return eng, dt
+
+    if kind in ("gas", "impact"):
         from core.gas_disk_engine import GasDiskEngine
-        pot = dict(_NO_POTENTIAL) if sc.kind == "impact" else None
-        eng = GasDiskEngine(pot=pot, softening=sc.softening)
+        pot = dict(_NO_POTENTIAL) if kind == "impact" else None
+        eng = GasDiskEngine(pot=pot, softening=softening)
         eng.setup(state.pos, state.vel, state.mass,
                   state.u if state.u is not None else _default_u(state.n))
         eng.time, eng.step_count = state.time, state.step
-        return eng, sc.dt
+        return eng, dt
 
-    if sc.kind == "living":
+    if kind == "galaxy":
+        import numpy as np
+        from core.living_galaxy_engine import LivingGalaxyEngine
+        from core.state import PTYPE_STAR, PTYPE_DM
+        eng = LivingGalaxyEngine(
+            pot=dict(_NO_POTENTIAL), softening=softening,
+            sf_prob=params.get("sf_prob", 0.03),
+            du_sn=params.get("du_sn", 400.0))
+        species = np.zeros(state.n, np.int32)
+        species[state.ptype == PTYPE_STAR] = 1
+        species[state.ptype == PTYPE_DM] = 2
+        eng.setup(state.pos, state.vel, state.mass,
+                  state.u if state.u is not None else _default_u(state.n),
+                  species=species)
+        eng.time, eng.step_count = state.time, state.step
+        if state.age is not None:
+            birth = np.where(state.age >= 0.0, state.time - state.age, 0.0)
+            eng._f["birth"].from_numpy(birth.astype(np.float64))
+        return eng, dt
+
+    if kind == "living":
         import numpy as np
         from core.living_galaxy_engine import LivingGalaxyEngine
         from core.state import PTYPE_STAR
-        eng = LivingGalaxyEngine(softening=sc.softening)
+        eng = LivingGalaxyEngine(softening=softening,
+                                 sf_prob=params.get("sf_prob", 0.03),
+                                 du_sn=params.get("du_sn", 500.0))
         eng.setup(state.pos, state.vel, state.mass,
                   state.u if state.u is not None else _default_u(state.n))
         eng.time, eng.step_count = state.time, state.step
@@ -156,9 +281,9 @@ def resume_scenario(name: str, state):
             birth = np.where(state.age >= 0.0, state.time - state.age, 0.0)
             eng._f["birth"].from_numpy(birth.astype(np.float64))
             eng._f["sn_done"].from_numpy(is_star)  # assume past SN already fired
-        return eng, sc.dt
+        return eng, dt
 
-    raise ValueError(f"cannot resume scenario kind: {sc.kind}")
+    raise ValueError(f"cannot resume scenario kind: {kind}")
 
 
 def _default_u(n):

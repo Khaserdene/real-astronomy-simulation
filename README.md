@@ -78,7 +78,8 @@ Snapshots are portable HDF5 files in physical galactic units (kpc, km/s,
 | Path | Purpose |
 |------|---------|
 | `core/` | Headless engine: units, state I/O, gravity, integrators, IC generators |
-| `core/solvers/gravity.py` | Direct N² gravity (Taichi GPU) — Barnes-Hut tree to come |
+| `core/solvers/gravity.py` | Direct N² gravity (Taichi GPU) |
+| `core/solvers/barnes_hut.py` | Barnes-Hut treecode (LBVH, O(N log N)) — `gravity_mode="bh"` |
 | `core/solvers/test_particle.py` | Fast "Preview" tier: tracers in a fixed analytic potential |
 | `core/ic/` | Deterministic initial conditions (Plummer sphere, exponential disk) |
 | `cli.py` | Headless runner → frame-by-frame snapshots |
@@ -101,14 +102,23 @@ Snapshots are portable HDF5 files in physical galactic units (kpc, km/s,
       stellar ageing (age->colour), supernova feedback (self-regulated SF, gas fountains)
 - [x] Phase 7 — cosmological structure formation (`core/ic/cosmo.py`, `--ic cosmo`):
       Zel'dovich box -> cosmic web; GADGET/GIZMO research bridge (`research/`)
+- [x] Phase 8 — unified multi-component galaxy (`core/ic/full_galaxy.py`,
+      scenario `galaxy`): stars + a **live** dark-matter halo + SPH gas, all
+      self-gravitating, with star formation + SN feedback (dust added at render).
+- [x] Phase 9 — Barnes-Hut treecode gravity (`core/solvers/barnes_hut.py`,
+      `Engine(gravity_mode="bh")`, GUI "Fast gravity" toggle): GPU LBVH (Karras)
+      tree, O(N log N). Validated vs direct (force err ~0.6% @ θ=0.5, energy
+      conserved); ~14× faster at N=100k. Wired for gravity scenarios; the
+      live-galaxy/SPH self-gravity still uses N² (BH hand-off there is next).
 
 ---
 
-## Roadmap — дараагийн session-д хийх сайжруулалтууд
+## Roadmap — ✅ бүгд хэрэгжсэн (this list is now DONE)
 
-> Энэ хэсэг нь **дараагийн AI session-д** зориулсан тодорхой даалгаврын жагсаалт.
-> Хэрэглэгчийн хүссэн өөрчлөлтүүд (одоо хийгдээгүй). Голчлон GUI (`gui/`) ба
-> backend (`core/sim_controller.py`, `core/scenarios.py`)-д хамаарна.
+> §1–§7 (+ Barnes-Hut) бүгд **хэрэгжиж, RTX 3070 дээр баталгаажсан**. Дэлгэрэнгүй
+> тайлан, баталгаажуулалт, үлдсэн нэмэлт ажлуудыг
+> [docs/SESSION_NOTES.md](docs/SESSION_NOTES.md)-ээс үзнэ үү. Доорх анхны
+> жагсаалтыг түүхэн лавлагаа болгон үлдээв.
 
 ### 1. Particles — дурын тоо оруулах
 - Одоо зөвхөн preset (5k/10k/20k/40k)-оос сонгоно — **учир дутагдалтай**.
