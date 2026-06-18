@@ -1,0 +1,64 @@
+# Simulation quality / scale presets.
+#
+# A "level" sets the numerical resolution of a run -- it does NOT change the
+# experiment.  The same Scene (IC type, physical parameters, seed, orbit) run at
+# different levels is "the same galaxy, sampled differently": only particle
+# count, timestep, softening and the solver change.  This is what makes the
+# preview -> production workflow meaningful.
+#
+# Fields:
+#   solver     : test_particle | direct | tree(later)
+#   n          : target total particle count
+#   dt         : integration timestep [code units ~ 0.978 Gyr]
+#   softening  : Plummer softening length [kpc] (ignored by test_particle)
+#   note       : human description
+
+levels:
+  preview:
+    solver: test_particle
+    n: 60000
+    dt: 2.0e-4
+    softening: 0.0
+    note: "Instant massless tracers in a frozen analytic potential. Gross
+           morphology only (disk shape, tidal tails) -- not self-consistent."
+
+  low:
+    solver: direct
+    n: 8000
+    dt: 2.0e-4
+    softening: 0.30
+    note: "Fast self-gravitating check. Coarse; prone to two-body relaxation."
+
+  medium:
+    solver: direct
+    n: 40000
+    dt: 1.0e-4
+    softening: 0.15
+    note: "Balanced quality for previews of structure."
+
+  high:
+    solver: direct
+    n: 120000
+    dt: 6.0e-5
+    softening: 0.08
+    note: "Production-quality morphology on a single consumer GPU."
+
+  ultra:
+    solver: direct
+    n: 400000
+    dt: 4.0e-5
+    softening: 0.05
+    note: "Heavy. Direct N^2 gets slow here; best paired with the tree solver
+           (later phase). Scale n down/up to fit your GPU."
+
+# Fraction of GPU VRAM the auto-detector is allowed to budget for particles.
+vram_budget_fraction: 0.6
+
+# Practical compute ceiling for the direct-N^2 solver when *suggesting* a level.
+# VRAM allows far more particles than this, but direct N^2 cost grows as N^2, so
+# the binding constraint is compute, not memory. Overrides can still exceed it.
+direct_comfortable_n: 150000
+
+# Approximate device-memory cost per particle (bytes). Direct solver keeps
+# pos+vel+acc (3x f64 vec3 = 72) + mass (8); the tree solver will add more.
+bytes_per_particle: 200
