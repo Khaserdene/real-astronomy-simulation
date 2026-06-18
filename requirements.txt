@@ -9,4 +9,8 @@ pynvml
 psutil
 pyyaml
 matplotlib
+# Desktop GUI (python -m gui.main)
+PyQt6
+pyqtgraph
+PyOpenGL
 # Blender (4.x) is installed separately, not via pip.

@@ -92,14 +92,31 @@ GPU-г олж байгааг шалга:
 
 ---
 
-## 5. Editor GUI (live 3D цонх)
+## 5. График интерфэйс (үндсэн арга) — PyQt6 апп
 
 ```bash
-.venv/Scripts/python.exe -m editor.app
+.venv/Scripts/python.exe -m gui.main
 ```
-Зүүн талын панелиас: IC сонгох, seed/level тохируулах, **Build** → **Run/Pause** →
-**Save snapshot** / **Load latest checkpoint** → **Export PLYs** → **Promote -> high**.
-Камер: баруун товч + чирэх (орбит). Viewport-д одод blackbody өнгөөр гэрэлтэнэ.
+
+Бүх ажил нэг цонхонд — CLI шаардахгүй:
+- **Scene** — дүр зураг сонгох (disk / merger / cosmic web / plummer / gas /
+  living / impact), seed, партиклын тоо.
+- **Run** — **Build** → **Run/Pause** → **Step**, steps/frame.
+- **View** — live 3D viewport (хулганаар орбит/зум), одод/хий физик өнгөөр.
+- **Output** — auto-snapshot, Save snapshot, **Load checkpoint** (file dialog).
+- **Timeline** — хадгалсан snapshot-уудыг слайдераар гүйлгэж үзэх (playback).
+- **Render (Blender)**:
+  - **Open in Blender (interactive)** — Blender GUI нээж, **төрлөөр нь объект+
+    материалтай** scene ачаална (одод emissive, хий volume, DM бүдэг). Та эндээс
+    материал/гэрэлтүүлэг/камераа засаж, өөрөө рэндэрлэнэ.
+  - **Quick render (headless)** — одоогийн фрэймийг автоматаар рэндэрлэж PNG нээнэ.
+
+> Том симуляц (High 40k) live ажиллахад GUI түр удааширч магадгүй — interactive-д
+> Preview/Low/Medium ашиглаж, том бодолтыг CLI-аар (§4) фонд хийгээрэй.
+> (Хуучин Taichi GGUI editor: `python -m editor.app` — хөнгөн хувилбар.)
+
+Blender-ийг олохын тулд апп нь `C:/Program Files/Blender Foundation/Blender */`-ийг
+автоматаар хайна; өөр байвал `BLENDER` орчны хувьсагчид `blender.exe`-ийн замаа тавь.
 
 ---
 

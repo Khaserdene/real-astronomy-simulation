@@ -10,6 +10,11 @@ roadmap. Status: **Phase 1 complete** (headless N-body core).
 **New here? Read [GUIDE.md](GUIDE.md)** — step-by-step usage (setup, running every
 scenario, the editor, and rendering), with copy-paste commands.
 
+**Prefer a window over the terminal?** Launch the desktop app:
+`.venv/Scripts/python.exe -m gui.main` — PyQt6 + a live 3D viewport, every
+scenario, snapshot playback, and one-click hand-off to Blender (interactive or
+headless). Plan/architecture: [docs/GUI_PLAN.md](docs/GUI_PLAN.md).
+
 ## Setup
 
 ```bash

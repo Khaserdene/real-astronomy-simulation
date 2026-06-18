@@ -17,6 +17,7 @@ from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
     QComboBox, QSpinBox, QPushButton, QLabel, QSlider, QCheckBox, QFormLayout,
+    QFileDialog,
 )
 
 from core.engine import init_taichi
@@ -102,7 +103,7 @@ class MainWindow(QMainWindow):
         vv.addLayout(size_row)
         v.addWidget(view_box)
 
-        # --- output ---
+        # --- output / checkpoints ---
         out_box = QGroupBox("Output")
         ov = QVBoxLayout(out_box)
         self.autosnap_check = QCheckBox("Auto-snapshot while running")
@@ -110,9 +111,38 @@ class MainWindow(QMainWindow):
             lambda c: setattr(self.ctrl.s, "auto_snapshot", c))
         self.save_btn = QPushButton("Save snapshot")
         self.save_btn.clicked.connect(lambda: self._set_status(self.ctrl.save_snapshot()))
+        self.load_btn = QPushButton("Load checkpoint...")
+        self.load_btn.clicked.connect(self._on_load)
         ov.addWidget(self.autosnap_check)
         ov.addWidget(self.save_btn)
+        ov.addWidget(self.load_btn)
         v.addWidget(out_box)
+
+        # --- timeline (snapshot playback) ---
+        tl_box = QGroupBox("Timeline (saved frames)")
+        tv = QVBoxLayout(tl_box)
+        self.refresh_btn = QPushButton("Refresh frames")
+        self.refresh_btn.clicked.connect(self._refresh_frames)
+        self.timeline = QSlider(Qt.Orientation.Horizontal)
+        self.timeline.setRange(0, 0)
+        self.timeline.valueChanged.connect(self._on_timeline)
+        self.frame_label = QLabel("no frames")
+        self._frames = []
+        tv.addWidget(self.refresh_btn)
+        tv.addWidget(self.timeline)
+        tv.addWidget(self.frame_label)
+        v.addWidget(tl_box)
+
+        # --- render ---
+        rbox = QGroupBox("Render (Blender)")
+        rl = QVBoxLayout(rbox)
+        self.blender_btn = QPushButton("Open in Blender (interactive)")
+        self.blender_btn.clicked.connect(self._on_open_blender)
+        self.quick_btn = QPushButton("Quick render (headless)")
+        self.quick_btn.clicked.connect(self._on_quick_render)
+        rl.addWidget(self.blender_btn)
+        rl.addWidget(self.quick_btn)
+        v.addWidget(rbox)
 
         v.addStretch(1)
         self.stats_label = QLabel("")
@@ -152,6 +182,67 @@ class MainWindow(QMainWindow):
 
     def _update_spf_label(self):
         pass  # label updates itself via _slider's connection
+
+    def _on_load(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load checkpoint", self.ctrl.s.out_dir, "Snapshots (*.h5)")
+        if path:
+            self._ensure_taichi()
+            self._set_status(self.ctrl.load_checkpoint(path))
+            self.run_btn.setText("Run")
+            self._refresh_view()
+
+    def _refresh_frames(self):
+        self._frames = self.ctrl.list_snapshots()
+        self.timeline.setRange(0, max(len(self._frames) - 1, 0))
+        self.frame_label.setText(
+            f"{len(self._frames)} frames" if self._frames else "no frames")
+
+    def _on_timeline(self, idx):
+        if self._frames and 0 <= idx < len(self._frames):
+            self.ctrl.s.running = False
+            self.run_btn.setText("Run")
+            pos, rgba = SimController.display_snapshot(self._frames[idx])
+            self.viewport.set_points(pos, rgba)
+            self.frame_label.setText(os.path.basename(self._frames[idx]))
+
+    def _on_open_blender(self):
+        if self.ctrl.engine is None:
+            self._set_status("build/run something first")
+            return
+        try:
+            from export.to_blender import export_frame
+            from gui.blender_launcher import open_in_blender
+            snap = self.ctrl.save_snapshot()
+            frame_dir = os.path.join(self.ctrl.s.out_dir, "blender_frame")
+            export_frame(snap, frame_dir)
+            open_in_blender(frame_dir)
+            self._set_status("opening in Blender (interactive)...")
+        except Exception as e:
+            self._set_status(f"Blender error: {e}")
+
+    def _on_quick_render(self):
+        if self.ctrl.engine is None:
+            self._set_status("build/run something first")
+            return
+        try:
+            from export.to_pointcloud import snapshot_to_ply
+            from gui.blender_launcher import quick_render
+            snap = self.ctrl.save_snapshot()
+            rdir = os.path.join(self.ctrl.s.out_dir, "_quick")
+            ply_dir = os.path.join(rdir, "ply")
+            os.makedirs(ply_dir, exist_ok=True)
+            snapshot_to_ply(snap, os.path.join(ply_dir, "frame.ply"))
+            self._set_status("rendering (blocks briefly)...")
+            QApplication.processEvents()
+            quick_render(ply_dir, os.path.join(rdir, "render"),
+                         res=900, samples=32, **{"cam-elev": 72})
+            png = os.path.join(rdir, "render", "frame.png")
+            if os.path.exists(png):
+                os.startfile(png)  # noqa: Windows
+            self._set_status("quick render done")
+        except Exception as e:
+            self._set_status(f"render error: {e}")
 
     # ------------------------------------------------------------------ loop
     def _tick(self):
