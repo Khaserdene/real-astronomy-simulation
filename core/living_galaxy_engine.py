@@ -254,3 +254,17 @@ class LivingGalaxyEngine:
         is_star = self._f["is_star"].to_numpy()
         birth = self._f["birth"].to_numpy()
         return np.where(is_star == 1, self.time - birth, -1.0)
+
+    def to_state(self):
+        """Export current state as a core.State (gas + star particle types)."""
+        from core.state import State, PTYPE_GAS, PTYPE_STAR
+        n = self.n
+        is_star = self._f["is_star"].to_numpy()
+        ptype = np.where(is_star == 1, PTYPE_STAR, PTYPE_GAS).astype(np.int32)
+        return State(
+            pos=self.get("pos"), vel=self.get("vel"), mass=self.get("mass"),
+            ptype=ptype, ids=np.arange(n, dtype=np.int64),
+            time=self.time, step=self.step_count,
+            u=self.get("u"), rho=self.get("rho"), age=self.ages(),
+            meta={"engine": "living_galaxy"},
+        )

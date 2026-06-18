@@ -40,6 +40,8 @@ class State:
     age: Optional[np.ndarray] = None          # [Gyr]
     temperature: Optional[np.ndarray] = None  # [K]
     metallicity: Optional[np.ndarray] = None  # [Z, dimensionless]
+    u: Optional[np.ndarray] = None            # internal energy [(km/s)^2] (gas)
+    rho: Optional[np.ndarray] = None          # SPH density (gas)
 
     # Free-form provenance (level name, IC type, parameters...).
     meta: dict = field(default_factory=dict)
@@ -76,7 +78,7 @@ class State:
             f.create_dataset("mass", data=self.mass, compression="gzip")
             f.create_dataset("ptype", data=self.ptype, compression="gzip")
             f.create_dataset("ids", data=self.ids, compression="gzip")
-            for name in ("age", "temperature", "metallicity"):
+            for name in ("age", "temperature", "metallicity", "u", "rho"):
                 arr = getattr(self, name)
                 if arr is not None:
                     f.create_dataset(name, data=np.asarray(arr, dtype=np.float64),
@@ -91,7 +93,7 @@ class State:
             meta = {k[len("meta_"):]: f.attrs[k] for k in f.attrs
                     if k.startswith("meta_")}
             optional = {}
-            for name in ("age", "temperature", "metallicity"):
+            for name in ("age", "temperature", "metallicity", "u", "rho"):
                 if name in f:
                     optional[name] = f[name][:]
             return cls(

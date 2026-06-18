@@ -108,3 +108,15 @@ class GasDiskEngine:
 
     def get(self, name):
         return self._f[name].to_numpy()
+
+    def to_state(self):
+        """Export the current gas state as a core.State (ptype = gas)."""
+        from core.state import State, PTYPE_GAS
+        n = self.n
+        return State(
+            pos=self.get("pos"), vel=self.get("vel"), mass=self.get("mass"),
+            ptype=np.full(n, PTYPE_GAS, np.int32), ids=np.arange(n, dtype=np.int64),
+            time=self.time, step=self.step_count,
+            u=self.get("u"), rho=self.get("rho"),
+            meta={"engine": "gas_disk"},
+        )
