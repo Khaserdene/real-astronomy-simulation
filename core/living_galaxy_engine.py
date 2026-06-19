@@ -92,10 +92,9 @@ def gas_forces(pos: ti.template(), vel: ti.template(), mass: ti.template(),
 
 
 @ti.kernel
-def grav_ext(pos: ti.template(), mass: ti.template(), acc: ti.template(),
-             n: ti.i32, eps2: ti.f64, M_d: ti.f64, a: ti.f64, b: ti.f64,
-             M_h: ti.f64, a_h: ti.f64):
-    """Add self-gravity (all particles) + analytic disk+halo potential to acc."""
+def grav_self_direct(pos: ti.template(), mass: ti.template(),
+                     acc: ti.template(), n: ti.i32, eps2: ti.f64):
+    """Add direct-N^2 self-gravity (all particles) to acc."""
     for i in range(n):
         av = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
         pi = pos[i]
@@ -104,12 +103,33 @@ def grav_ext(pos: ti.template(), mass: ti.template(), acc: ti.template(),
             r2 = d.dot(d) + eps2
             inv = 1.0 / ti.sqrt(r2)
             av += (G * mass[j] * inv * inv * inv) * d
+        acc[i] += av
+
+
+@ti.kernel
+def add_acc(acc: ti.template(), acc_g: ti.template(), n: ti.i32):
+    """acc += acc_g  (fold a separately-computed gravity field into acc)."""
+    for i in range(n):
+        acc[i] += acc_g[i]
+
+
+@ti.kernel
+def grav_analytic(pos: ti.template(), acc: ti.template(), n: ti.i32,
+                  M_d: ti.f64, a: ti.f64, b: ti.f64,
+                  M_h: ti.f64, a_h: ti.f64):
+    """Add the analytic disk (Miyamoto-Nagai) + halo potential to acc.
+
+    A no-op when ``M_d == M_h == 0`` (the fully-live galaxy case), so it is safe
+    to always call after self-gravity regardless of the gravity solver in use.
+    """
+    for i in range(n):
+        pi = pos[i]
         R2 = pi.x * pi.x + pi.y * pi.y
         S = ti.sqrt(pi.z * pi.z + b * b)
         aS = a + S
         invD3 = (R2 + aS * aS) ** (-1.5)
-        av += ti.Vector([-G * M_d * pi.x * invD3, -G * M_d * pi.y * invD3,
-                         -G * M_d * pi.z * aS * invD3 / S], dt=ti.f64)
+        av = ti.Vector([-G * M_d * pi.x * invD3, -G * M_d * pi.y * invD3,
+                        -G * M_d * pi.z * aS * invD3 / S], dt=ti.f64)
         rh = R2 + pi.z * pi.z + a_h * a_h
         av += -(G * M_h * rh ** (-1.5)) * pi
         acc[i] += av
@@ -185,15 +205,164 @@ def cool_gas(u: ti.template(), is_star: ti.template(), n: ti.i32, dt: ti.f64,
                 u[i] = u_floor + excess * decay
 
 
+# ------------------------------------------------- grid-accelerated SPH kernels
+# These mirror the N^2 kernels above but visit only the 3x3x3 block of grid cells
+# around each particle (see core.solvers.neighbor_grid).  ``gsort`` holds gas
+# global indices ordered by cell; ``cell_start[c]..cell_start[c+1]`` is cell c's
+# slice.  The grid cell size >= every SPH search radius, so a 3x3x3 stencil is
+# exact.  All binned particles are gas, so no is_star check is needed on j.
+@ti.func
+def _cell_of(pi, lox: ti.f64, loy: ti.f64, loz: ti.f64, inv_cell: ti.f64,
+             nx: ti.i32, ny: ti.i32, nz: ti.i32):
+    cx = ti.min(ti.max(ti.i32((pi.x - lox) * inv_cell), 0), nx - 1)
+    cy = ti.min(ti.max(ti.i32((pi.y - loy) * inv_cell), 0), ny - 1)
+    cz = ti.min(ti.max(ti.i32((pi.z - loz) * inv_cell), 0), nz - 1)
+    return cx, cy, cz
+
+
+@ti.kernel
+def gas_density_grid(pos: ti.template(), mass: ti.template(),
+                     rho: ti.template(), h: ti.template(),
+                     is_star: ti.template(), n: ti.i32,
+                     gsort: ti.template(), cell_start: ti.template(),
+                     nx: ti.i32, ny: ti.i32, nz: ti.i32,
+                     lox: ti.f64, loy: ti.f64, loz: ti.f64, inv_cell: ti.f64):
+    for i in range(n):
+        if is_star[i] == 0:
+            acc = 0.0
+            pi = pos[i]
+            hi = h[i]
+            cx, cy, cz = _cell_of(pi, lox, loy, loz, inv_cell, nx, ny, nz)
+            for dx in range(-1, 2):
+                bx = cx + dx
+                if 0 <= bx < nx:
+                    for dy in range(-1, 2):
+                        by = cy + dy
+                        if 0 <= by < ny:
+                            for dz in range(-1, 2):
+                                bz = cz + dz
+                                if 0 <= bz < nz:
+                                    c = (bx * ny + by) * nz + bz
+                                    for s in range(cell_start[c],
+                                                   cell_start[c + 1]):
+                                        j = gsort[s]
+                                        if is_star[j] == 0:
+                                            r = (pos[j] - pi).norm()
+                                            if r < 2.0 * hi:
+                                                acc += mass[j] * cubic_w(r, hi)
+            rho[i] = ti.max(acc, 1e-12)
+
+
+@ti.kernel
+def gas_forces_grid(pos: ti.template(), vel: ti.template(), mass: ti.template(),
+                    rho: ti.template(), pressure: ti.template(),
+                    cs: ti.template(), h: ti.template(), acc: ti.template(),
+                    du: ti.template(), is_star: ti.template(), n: ti.i32,
+                    alpha: ti.f64, beta: ti.f64,
+                    gsort: ti.template(), cell_start: ti.template(),
+                    nx: ti.i32, ny: ti.i32, nz: ti.i32,
+                    lox: ti.f64, loy: ti.f64, loz: ti.f64, inv_cell: ti.f64):
+    for i in range(n):
+        a = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+        dudt = 0.0
+        if is_star[i] == 0:
+            pi = pos[i]
+            vi = vel[i]
+            pr_i = pressure[i] / (rho[i] * rho[i])
+            cx, cy, cz = _cell_of(pi, lox, loy, loz, inv_cell, nx, ny, nz)
+            for dx in range(-1, 2):
+                bx = cx + dx
+                if 0 <= bx < nx:
+                    for dy in range(-1, 2):
+                        by = cy + dy
+                        if 0 <= by < ny:
+                            for dz in range(-1, 2):
+                                bz = cz + dz
+                                if 0 <= bz < nz:
+                                    c = (bx * ny + by) * nz + bz
+                                    for s in range(cell_start[c],
+                                                   cell_start[c + 1]):
+                                        j = gsort[s]
+                                        if is_star[j] == 0 and j != i:
+                                            dr = pi - pos[j]
+                                            r = dr.norm()
+                                            hij = 0.5 * (h[i] + h[j])
+                                            if 1e-12 < r < 2.0 * hij:
+                                                dv = vi - vel[j]
+                                                pr_j = pressure[j] / (
+                                                    rho[j] * rho[j])
+                                                visc = 0.0
+                                                dvdr = dv.dot(dr)
+                                                if dvdr < 0.0:
+                                                    mu = hij * dvdr / (
+                                                        r * r + 0.01 * hij * hij)
+                                                    c_bar = 0.5 * (cs[i] + cs[j])
+                                                    rho_bar = 0.5 * (
+                                                        rho[i] + rho[j])
+                                                    visc = (-alpha * c_bar * mu
+                                                            + beta * mu * mu
+                                                            ) / rho_bar
+                                                grad = cubic_dwdr(r, hij) * (
+                                                    dr / r)
+                                                coeff = pr_i + pr_j + visc
+                                                a += -mass[j] * coeff * grad
+                                                dudt += 0.5 * mass[j] * coeff \
+                                                    * dv.dot(grad)
+        acc[i] = a
+        du[i] = dudt
+
+
+@ti.kernel
+def feedback_grid(pos: ti.template(), u: ti.template(), is_star: ti.template(),
+                  exploding: ti.template(), n: ti.i32, r_fb: ti.f64,
+                  du_sn: ti.f64, gsort: ti.template(),
+                  cell_start: ti.template(), nx: ti.i32, ny: ti.i32, nz: ti.i32,
+                  lox: ti.f64, loy: ti.f64, loz: ti.f64, inv_cell: ti.f64):
+    """Inject SN energy into nearby gas, walking the grid from each exploder.
+
+    Loops over exploding stars (rare) instead of over gas, scattering ``du_sn``
+    into each gas neighbour within ``r_fb`` (the grid cell size is >= r_fb, so
+    the 3x3x3 stencil is exact).  Equivalent to the N^2 ``feedback`` kernel.
+    """
+    for i in range(n):
+        if exploding[i] == 1:
+            pi = pos[i]
+            cx, cy, cz = _cell_of(pi, lox, loy, loz, inv_cell, nx, ny, nz)
+            for dx in range(-1, 2):
+                bx = cx + dx
+                if 0 <= bx < nx:
+                    for dy in range(-1, 2):
+                        by = cy + dy
+                        if 0 <= by < ny:
+                            for dz in range(-1, 2):
+                                bz = cz + dz
+                                if 0 <= bz < nz:
+                                    c = (bx * ny + by) * nz + bz
+                                    for s in range(cell_start[c],
+                                                   cell_start[c + 1]):
+                                        j = gsort[s]
+                                        if is_star[j] == 0 and (
+                                                pos[j] - pi).norm() < r_fb:
+                                            ti.atomic_add(u[j], du_sn)
+
+
 class LivingGalaxyEngine:
     def __init__(self, pot=None, gamma=5.0 / 3.0, alpha=1.0, beta=2.0,
                  eta=1.3, softening=0.2,
                  sf_density_factor=8.0, sf_prob=0.05,
                  t_sn=0.02, r_fb=0.6, du_sn=400.0,
-                 cooling=True, u_floor=60.0, t_cool=0.02):
+                 cooling=True, u_floor=60.0, t_cool=0.02,
+                 gravity_mode="direct", theta=0.6):
         self.pot = pot or dict(M_d=5.0, a=3.0, b=0.3, M_h=12.0, a_h=8.0)
         self.gamma, self.alpha, self.beta, self.eta = gamma, alpha, beta, eta
+        self.softening = float(softening)
         self.eps2 = softening ** 2
+        # Self-gravity solver: "direct" (N^2) or "bh" (Barnes-Hut treecode).
+        self.gravity_mode = gravity_mode
+        self.theta = float(theta)
+        self._bh = None
+        # Uniform-grid neighbour search for the SPH kernels (built for large N).
+        self._grid = None
         self.sf_density_factor = sf_density_factor
         self.sf_prob, self.t_sn, self.r_fb, self.du_sn = sf_prob, t_sn, r_fb, du_sn
         # Radiative cooling (gas only): relax u toward u_floor on timescale t_cool.
@@ -218,7 +387,7 @@ class LivingGalaxyEngine:
         n = pos.shape[0]
         self.n = n
         f = {name: ti.Vector.field(3, ti.f64, shape=n)
-             for name in ("pos", "vel", "acc")}
+             for name in ("pos", "vel", "acc", "acc_g")}
         for name in ("mass", "u", "du", "rho", "pressure", "cs", "h", "birth"):
             f[name] = ti.field(ti.f64, shape=n)
         for name in ("is_star", "sn_done", "exploding"):
@@ -238,29 +407,76 @@ class LivingGalaxyEngine:
         f["exploding"].from_numpy(np.zeros(n, np.int32))
         f["birth"].from_numpy(np.zeros(n, np.float64))
         f["h"].from_numpy(np.full(n, 0.4))
+        # Barnes-Hut pays off only for large N; small systems stay on direct N^2.
+        if self.gravity_mode == "bh" and n >= 256:
+            from core.solvers.barnes_hut import BarnesHut
+            self._bh = BarnesHut(n, theta=self.theta, softening=self.softening)
+        else:
+            self._bh = None
+        # Grid neighbour search pays off only for large gas counts; small runs
+        # keep the exact N^2 SPH kernels (no binning overhead, no edge cases).
+        if n >= 2000:
+            from core.solvers.neighbor_grid import NeighborGrid
+            self._grid = NeighborGrid(n, min_radius=self.r_fb)
+        else:
+            self._grid = None
         self._density_h(20)
         # Star-formation threshold = factor * median gas density.
         self._rho_thresh = self.sf_density_factor * float(
             np.median(f["rho"].to_numpy()))
         self._forces()
 
+    def _grid_ready(self) -> bool:
+        return self._grid is not None and self._grid.ngas > 0
+
+    def _gas_density(self):
+        """Density estimate; rebuilds the neighbour grid first when enabled."""
+        f = self._f
+        ng = self._grid.rebuild(f["pos"], f["h"], f["is_star"]) \
+            if self._grid is not None else 0
+        if ng > 0:
+            g = self._grid
+            gas_density_grid(f["pos"], f["mass"], f["rho"], f["h"], f["is_star"],
+                             self.n, g.gsort, g.cell_start, g.nx, g.ny, g.nz,
+                             g.lo[0], g.lo[1], g.lo[2], g.inv_cell)
+        else:
+            gas_density(f["pos"], f["mass"], f["rho"], f["h"], f["is_star"],
+                        self.n)
+
     def _density_h(self, iters=3):
         f = self._f
         for _ in range(iters):
-            gas_density(f["pos"], f["mass"], f["rho"], f["h"], f["is_star"], self.n)
+            self._gas_density()
             update_h_gas(f["rho"], f["mass"], f["h"], f["is_star"], self.n, self.eta)
-        gas_density(f["pos"], f["mass"], f["rho"], f["h"], f["is_star"], self.n)
+        self._gas_density()
 
     def _forces(self):
         f = self._f
         gas_pressure(f["rho"], f["u"], f["pressure"], f["cs"], f["is_star"],
                      self.n, self.gamma)
-        gas_forces(f["pos"], f["vel"], f["mass"], f["rho"], f["pressure"],
-                   f["cs"], f["h"], f["acc"], f["du"], f["is_star"], self.n,
-                   self.alpha, self.beta)
-        grav_ext(f["pos"], f["mass"], f["acc"], self.n, self.eps2,
-                 self.pot["M_d"], self.pot["a"], self.pot["b"],
-                 self.pot["M_h"], self.pot["a_h"])
+        # SPH pressure forces reuse the grid the last density pass rebuilt
+        # (positions are unchanged since then); stars are filtered inside.
+        if self._grid_ready():
+            g = self._grid
+            gas_forces_grid(f["pos"], f["vel"], f["mass"], f["rho"],
+                            f["pressure"], f["cs"], f["h"], f["acc"], f["du"],
+                            f["is_star"], self.n, self.alpha, self.beta,
+                            g.gsort, g.cell_start, g.nx, g.ny, g.nz,
+                            g.lo[0], g.lo[1], g.lo[2], g.inv_cell)
+        else:
+            gas_forces(f["pos"], f["vel"], f["mass"], f["rho"], f["pressure"],
+                       f["cs"], f["h"], f["acc"], f["du"], f["is_star"], self.n,
+                       self.alpha, self.beta)
+        # Self-gravity over all particles (gas + stars + DM).
+        if self._bh is not None:
+            self._bh.compute(f["pos"], f["mass"], f["acc_g"])
+            add_acc(f["acc"], f["acc_g"], self.n)
+        else:
+            grav_self_direct(f["pos"], f["mass"], f["acc"], self.n, self.eps2)
+        # Analytic disk+halo potential (a no-op when M_d == M_h == 0).
+        grav_analytic(f["pos"], f["acc"], self.n,
+                      self.pot["M_d"], self.pot["a"], self.pot["b"],
+                      self.pot["M_h"], self.pot["a_h"])
 
     def step(self, dt):
         f = self._f
@@ -273,8 +489,15 @@ class LivingGalaxyEngine:
                    self._rho_thresh, self.sf_prob)
         mark_supernovae(f["is_star"], f["birth"], f["sn_done"], f["exploding"],
                         self.n, self.time, self.t_sn)
-        feedback(f["pos"], f["u"], f["is_star"], f["exploding"], self.n,
-                 self.r_fb, self.du_sn)
+        if self._grid_ready():
+            g = self._grid
+            feedback_grid(f["pos"], f["u"], f["is_star"], f["exploding"], self.n,
+                          self.r_fb, self.du_sn, g.gsort, g.cell_start,
+                          g.nx, g.ny, g.nz, g.lo[0], g.lo[1], g.lo[2],
+                          g.inv_cell)
+        else:
+            feedback(f["pos"], f["u"], f["is_star"], f["exploding"], self.n,
+                     self.r_fb, self.du_sn)
         self._forces()
         kick(f["vel"], f["acc"], f["u"], f["du"], f["is_star"], self.n, half)
         if self.cooling and self.inv_tcool > 0.0:

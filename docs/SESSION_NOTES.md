@@ -42,9 +42,19 @@ plus the Barnes-Hut treecode. Everything below was validated on real hardware
 1. **Interactive click-through validation** — launch the GUI and exercise the
    scene-builder (collide 2 galaxies), 3D brush drag, timeline scrub by hand
    (this session's `computer-use` request_access timed out).
-2. **Barnes-Hut in the SPH/galaxy engine** — `LivingGalaxyEngine.grav_ext` still
-   uses direct N²; hand its self-gravity to the BH treecode so the unified
-   `galaxy` scenario also scales to large N.
+2. ~~**Barnes-Hut in the SPH/galaxy engine**~~ ✅ **DONE.** `LivingGalaxyEngine`
+   now routes self-gravity through the BH treecode when `gravity_mode="bh"`.
+   `grav_ext` was split into `grav_self_direct` (N²) + `grav_analytic` (disk+halo)
+   + `add_acc`; `setup()` builds a `BarnesHut` for `n>=256`; `_forces` writes the
+   tree gravity into a scratch `acc_g` field then folds it in. `gravity_mode`/
+   `theta` thread through `build_scenario`/`resume_scenario` for `living`+`galaxy`
+   (the GUI "Fast gravity" toggle + Physics dialog now affect these too).
+   Verified (`verify_bh_galaxy.py`): force rel-err mean 2.3% @ θ=0.6 on the galaxy
+   ICs, KE matches direct within 0.4% after 20 steps; gravity-only speedup ×5.7
+   @ 30k, ×9.7 @ 60k. `verify_gui_g1.py` still passes all 8 scenarios.
+   **Caveat / next:** the galaxy step's *SPH* neighbour search (`gas_density`,
+   `gas_forces`) is still O(N²), so the full step doesn't yet scale to large N —
+   give SPH a tree/grid neighbour structure to finish the job.
 3. **Blender extension in real Blender** — fetch the `h5py` wheel
    (`blender_addon/fetch_wheels.py`), build & install the extension, confirm
    `.h5` animation playback (`blender_addon/README.md`).

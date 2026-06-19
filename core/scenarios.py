@@ -179,6 +179,7 @@ def build_scenario(name: str, n: int = 20000, seed: int = 0,
         from core.living_galaxy_engine import LivingGalaxyEngine
         pos, vel, mass, u = make_gas_disk(n=n, seed=seed)
         eng = LivingGalaxyEngine(softening=sc.softening,
+                                 gravity_mode=gravity_mode, theta=theta,
                                  sf_prob=ep.get("sf_prob", p.get("sf_prob", 0.03)),
                                  du_sn=ep.get("du_sn", p.get("du_sn", 500.0)),
                                  **_cool_kw(ep))
@@ -191,6 +192,7 @@ def build_scenario(name: str, n: int = 20000, seed: int = 0,
         pos, vel, mass, u, species = make_full_galaxy(n=n, seed=seed)
         eng = LivingGalaxyEngine(
             pot=dict(_NO_POTENTIAL), softening=sc.softening,   # fully live gravity
+            gravity_mode=gravity_mode, theta=theta,
             sf_prob=ep.get("sf_prob", p.get("sf_prob", 0.03)),
             du_sn=ep.get("du_sn", p.get("du_sn", 400.0)), **_cool_kw(ep))
         eng.setup(pos, vel, mass, u, species=species)
@@ -242,10 +244,12 @@ def resume_scenario(name: str, state, spec=None):
         softening = sc.softening if sc else 0.1
         params = {}
 
+    # Self-gravity solver carried by the scene spec (falls back for old files).
+    gmode = spec.gravity_mode if spec is not None else "direct"
+    gtheta = spec.theta if spec is not None else 0.6
+
     if kind == "gravity":
         from core.engine import Engine
-        gmode = spec.gravity_mode if spec is not None else "direct"
-        gtheta = spec.theta if spec is not None else 0.6
         eng = Engine(softening=softening, gravity_mode=gmode, theta=gtheta)
         eng.load_state(state)
         return eng, dt
@@ -265,6 +269,7 @@ def resume_scenario(name: str, state, spec=None):
         from core.state import PTYPE_STAR, PTYPE_DM
         eng = LivingGalaxyEngine(
             pot=dict(_NO_POTENTIAL), softening=softening,
+            gravity_mode=gmode, theta=gtheta,
             sf_prob=params.get("sf_prob", 0.03),
             du_sn=params.get("du_sn", 400.0))
         species = np.zeros(state.n, np.int32)
@@ -284,6 +289,7 @@ def resume_scenario(name: str, state, spec=None):
         from core.living_galaxy_engine import LivingGalaxyEngine
         from core.state import PTYPE_STAR
         eng = LivingGalaxyEngine(softening=softening,
+                                 gravity_mode=gmode, theta=gtheta,
                                  sf_prob=params.get("sf_prob", 0.03),
                                  du_sn=params.get("du_sn", 500.0))
         eng.setup(state.pos, state.vel, state.mass,
