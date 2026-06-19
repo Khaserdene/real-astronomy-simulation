@@ -169,16 +169,37 @@ def drift(pos: ti.template(), vel: ti.template(), n: ti.i32, dt: ti.f64):
         pos[i] += vel[i] * dt
 
 
+@ti.kernel
+def cool_gas(u: ti.template(), is_star: ti.template(), n: ti.i32, dt: ti.f64,
+             u_floor: ti.f64, inv_tcool: ti.f64):
+    """Radiative cooling on gas only: relax u toward a floor (exp, stable).
+
+    Lets shock + supernova heat radiate away so gas settles into a thin cold
+    disk instead of being puffed up and dispersed.  Skips stars/DM (is_star!=0).
+    """
+    decay = ti.exp(-dt * inv_tcool)
+    for i in range(n):
+        if is_star[i] == 0:
+            excess = u[i] - u_floor
+            if excess > 0.0:
+                u[i] = u_floor + excess * decay
+
+
 class LivingGalaxyEngine:
     def __init__(self, pot=None, gamma=5.0 / 3.0, alpha=1.0, beta=2.0,
                  eta=1.3, softening=0.2,
                  sf_density_factor=8.0, sf_prob=0.05,
-                 t_sn=0.02, r_fb=0.6, du_sn=400.0):
+                 t_sn=0.02, r_fb=0.6, du_sn=400.0,
+                 cooling=True, u_floor=60.0, t_cool=0.02):
         self.pot = pot or dict(M_d=5.0, a=3.0, b=0.3, M_h=12.0, a_h=8.0)
         self.gamma, self.alpha, self.beta, self.eta = gamma, alpha, beta, eta
         self.eps2 = softening ** 2
         self.sf_density_factor = sf_density_factor
         self.sf_prob, self.t_sn, self.r_fb, self.du_sn = sf_prob, t_sn, r_fb, du_sn
+        # Radiative cooling (gas only): relax u toward u_floor on timescale t_cool.
+        self.cooling = bool(cooling)
+        self.u_floor = float(u_floor)
+        self.inv_tcool = 1.0 / float(t_cool) if t_cool > 0 else 0.0
         self.n = 0
         self.time = 0.0
         self.step_count = 0
@@ -256,6 +277,8 @@ class LivingGalaxyEngine:
                  self.r_fb, self.du_sn)
         self._forces()
         kick(f["vel"], f["acc"], f["u"], f["du"], f["is_star"], self.n, half)
+        if self.cooling and self.inv_tcool > 0.0:
+            cool_gas(f["u"], f["is_star"], self.n, dt, self.u_floor, self.inv_tcool)
         self.step_count += 1
 
     def get(self, name):

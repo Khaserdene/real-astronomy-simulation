@@ -208,6 +208,18 @@ class MainWindow(QMainWindow):
         self.autosnap_check = QCheckBox("Auto-snapshot while running")
         self.autosnap_check.toggled.connect(
             lambda c: setattr(self.ctrl.s, "auto_snapshot", c))
+        # How many simulation steps each saved frame represents. Smaller = more
+        # frames (smoother playback, finer time sampling, more disk); larger =
+        # fewer frames covering more evolution per frame.
+        self.snap_every_spin = QSpinBox()
+        self.snap_every_spin.setRange(1, 100000)
+        self.snap_every_spin.setValue(self.ctrl.s.snap_every)
+        self.snap_every_spin.setGroupSeparatorShown(True)
+        self.snap_every_spin.valueChanged.connect(
+            lambda v: setattr(self.ctrl.s, "snap_every", v))
+        snap_row = QHBoxLayout()
+        snap_row.addWidget(QLabel("Steps / saved frame"))
+        snap_row.addWidget(self.snap_every_spin)
         self.save_btn = QPushButton("Save snapshot")
         self.save_btn.clicked.connect(self._on_save)
         self.load_btn = QPushButton("Load checkpoint...")
@@ -216,6 +228,7 @@ class MainWindow(QMainWindow):
         ov.addWidget(self.folder_btn)
         ov.addWidget(self.open_folder_btn)
         ov.addWidget(self.autosnap_check)
+        ov.addLayout(snap_row)
         ov.addWidget(self.save_btn)
         ov.addWidget(self.load_btn)
         v.addWidget(out_box)

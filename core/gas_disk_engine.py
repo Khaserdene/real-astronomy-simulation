@@ -44,12 +44,35 @@ def add_grav_ext(pos: ti.template(), mass: ti.template(), acc: ti.template(),
         acc[i] += av
 
 
+@ti.kernel
+def cool_to_floor(u: ti.template(), n: ti.i32, dt: ti.f64,
+                  u_floor: ti.f64, inv_tcool: ti.f64):
+    """Radiative cooling: relax internal energy toward a floor.
+
+    Excess thermal energy above ``u_floor`` decays on timescale ``1/inv_tcool``
+    via exponential relaxation -- unconditionally stable for any ``dt``, never
+    overshoots, and never cools below the floor.  This stands in for a full
+    cooling function and is what lets shock/feedback heat radiate away so the gas
+    settles into a thin cold disk instead of puffing up and dispersing.
+    """
+    decay = ti.exp(-dt * inv_tcool)
+    for i in range(n):
+        excess = u[i] - u_floor
+        if excess > 0.0:
+            u[i] = u_floor + excess * decay
+
+
 class GasDiskEngine:
     def __init__(self, pot=None, gamma=5.0 / 3.0, alpha=1.0, beta=2.0,
-                 eta=1.3, softening=0.2):
+                 eta=1.3, softening=0.2,
+                 cooling=True, u_floor=60.0, t_cool=0.02):
         self.pot = pot or dict(M_d=5.0, a=3.0, b=0.3, M_h=12.0, a_h=8.0)
         self.gamma, self.alpha, self.beta, self.eta = gamma, alpha, beta, eta
         self.eps2 = softening ** 2
+        # Radiative cooling: relax u toward u_floor on timescale t_cool.
+        self.cooling = bool(cooling)
+        self.u_floor = float(u_floor)
+        self.inv_tcool = 1.0 / float(t_cool) if t_cool > 0 else 0.0
         self.n = 0
         self.time = 0.0
         self.step_count = 0
@@ -103,6 +126,8 @@ class GasDiskEngine:
         self._density_h()
         self._forces()
         _kick(f["vel"], f["acc"], f["u"], f["du"], f["frozen"], self.n, half)
+        if self.cooling and self.inv_tcool > 0.0:
+            cool_to_floor(f["u"], self.n, dt, self.u_floor, self.inv_tcool)
         self.time += dt
         self.step_count += 1
 
