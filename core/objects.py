@@ -42,7 +42,8 @@ OBJECTS: dict[str, ObjectTemplate] = {
         "disk_galaxy", "Disk galaxy", "galaxy", "gravity",
         dt=1e-4, softening=0.1,
         defaults=dict(disk_mass=5.0, disk_scale=3.0, disk_height=0.25,
-                      halo_mass=12.0, halo_scale=8.0, disk_fraction=0.7),
+                      halo_mass=12.0, halo_scale=8.0, disk_fraction=0.7,
+                      sigma_frac=0.1),
         description="Stellar exponential disk in a live Plummer DM halo."),
     "plummer_blob": ObjectTemplate(
         "plummer_blob", "Plummer blob", "galaxy", "gravity",
@@ -107,7 +108,8 @@ def build_object(template: str, n: int, seed: int, params: dict | None = None):
         st = make_disk_galaxy(n_disk=n_disk, n_halo=n_halo, seed=seed,
                               disk_mass=p["disk_mass"], disk_scale=p["disk_scale"],
                               disk_height=p["disk_height"],
-                              halo_mass=p["halo_mass"], halo_scale=p["halo_scale"])
+                              halo_mass=p["halo_mass"], halo_scale=p["halo_scale"],
+                              sigma_frac=p.get("sigma_frac", 0.1))
         return dict(pos=st.pos, vel=st.vel, mass=st.mass, ptype=st.ptype, u=None)
 
     if template == "plummer_blob":

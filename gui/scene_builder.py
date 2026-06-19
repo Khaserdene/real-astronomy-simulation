@@ -74,7 +74,7 @@ class SceneBuilderDialog(QDialog):
         form = QFormLayout()
 
         self.template_combo = QComboBox()
-        self.template_combo.currentTextChanged.connect(self._write_back)
+        self.template_combo.currentTextChanged.connect(self._on_template_change)
         self.n_spin = QSpinBox(); self.n_spin.setRange(10, 2_000_000)
         self.n_spin.setGroupSeparatorShown(True); self.n_spin.setSingleStep(1000)
         self.n_spin.valueChanged.connect(self._write_back)
@@ -96,13 +96,55 @@ class SceneBuilderDialog(QDialog):
         form.addRow("Spin (z)", self.spin_spin)
 
         outer.addLayout(form)
-        self.params_label = QLabel("")
-        self.params_label.setWordWrap(True)
-        self.params_label.setStyleSheet("color: gray; font-size: 10px;")
-        outer.addWidget(self.params_label)
+        # Dynamic physics-parameter editor -- rebuilt for each object template so
+        # every galaxy/planet parameter (masses, scales, halo, gas, sound speed,
+        # Toomre temperature, ...) is editable, not just a read-only default.
+        self.param_box = QGroupBox("Parameters")
+        self.param_form = QFormLayout(self.param_box)
+        self._param_spins: dict = {}
+        outer.addWidget(self.param_box)
+        self.desc_label = QLabel("")
+        self.desc_label.setWordWrap(True)
+        self.desc_label.setStyleSheet("color: gray; font-size: 10px;")
+        outer.addWidget(self.desc_label)
         outer.addStretch(1)
         box.setEnabled(False)   # nothing selected yet
         return box
+
+    # --------------------------------------------------- dynamic parameter form
+    def _rebuild_param_fields(self, template: str):
+        """Replace the parameter widgets with one spin box per template default."""
+        while self.param_form.rowCount():
+            self.param_form.removeRow(0)
+        self._param_spins = {}
+        for key, default in OBJECTS[template].defaults.items():
+            spin = self._param_spin(key, float(default))
+            self.param_form.addRow(key, spin)
+            self._param_spins[key] = spin
+
+    def _param_spin(self, key: str, default: float) -> QDoubleSpinBox:
+        s = QDoubleSpinBox()
+        if "frac" in key:                       # fractions: 0..1
+            s.setRange(0.0, 1.0); s.setDecimals(3); s.setSingleStep(0.05)
+        else:
+            s.setRange(0.0, 1.0e5); s.setDecimals(3)
+            s.setSingleStep(max(abs(default) / 10.0, 0.01))
+        s.setValue(default)
+        s.valueChanged.connect(self._write_back)
+        return s
+
+    def _on_template_change(self, _text):
+        row = self.obj_list.currentRow()
+        if self._loading or not (0 <= row < len(self._objects)):
+            return
+        o = self._objects[row]
+        o.template = self.template_combo.currentData() or o.template
+        o.params = {}                            # new template -> its own defaults
+        self._loading = True
+        self._rebuild_param_fields(o.template)
+        self.desc_label.setText(OBJECTS[o.template].description)
+        self._loading = False
+        self._write_back()
 
     def _coord(self) -> QDoubleSpinBox:
         s = QDoubleSpinBox()
@@ -159,9 +201,11 @@ class SceneBuilderDialog(QDialog):
             self.pos[k].setValue(float(o.position[k]))
             self.vel[k].setValue(float(o.velocity[k]))
         self.spin_spin.setValue(float(o.spin or 0.0))
-        self.params_label.setText(
-            "defaults: " + ", ".join(f"{k}={v}" for k, v in
-                                     OBJECTS[o.template].defaults.items()))
+        self._rebuild_param_fields(o.template)
+        for key, spin in self._param_spins.items():
+            spin.setValue(float(o.params.get(key,
+                          OBJECTS[o.template].defaults[key])))
+        self.desc_label.setText(OBJECTS[o.template].description)
         self._loading = False
 
     def _write_back(self, *_):
@@ -175,10 +219,8 @@ class SceneBuilderDialog(QDialog):
         o.position = [c.value() for c in self.pos]
         o.velocity = [c.value() for c in self.vel]
         o.spin = self.spin_spin.value() or None
+        o.params = {key: spin.value() for key, spin in self._param_spins.items()}
         self.obj_list.item(row).setText(self._summary(o))
-        self.params_label.setText(
-            "defaults: " + ", ".join(f"{k}={v}" for k, v in
-                                     OBJECTS[o.template].defaults.items()))
 
     def _accept(self):
         if not self._objects:
