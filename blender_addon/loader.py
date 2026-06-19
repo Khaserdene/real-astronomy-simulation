@@ -332,7 +332,13 @@ def load_folder(folder: str) -> int:
                     emissive_points_material("Stars", color_attr="Col", strength=1.4))
     objs["Stars"] = stars
     gas = _new_object("AstroGas")
-    volume_modifier(gas, 0.3, 0.6, gas_volume_material())
+    # Import gas as emissive POINTS (not a volume) by default -- it's predictable
+    # and easy to art-direct. The per-point "density"/"temperature" attributes are
+    # still written, so you can add a Points-to-Volume + Principled Volume by hand
+    # later if you want true volumetric gas.
+    points_modifier(gas, 0.06,
+                    emissive_points_material("Gas", color=(1.0, 0.5, 0.2),
+                                             strength=0.7))
     objs["Gas"] = gas
     dm = _new_object("AstroDM")
     points_modifier(dm, 0.05,
