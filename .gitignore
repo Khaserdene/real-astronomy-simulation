@@ -18,3 +18,7 @@ output/
 Thumbs.db
 .vscode/
 .idea/
+
+# Blender extension build artifacts (regenerate via fetch_wheels.py + extension build)
+blender_addon/wheels/
+blender_addon/*.zip
