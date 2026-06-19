@@ -97,7 +97,11 @@ def volume_modifier(obj, voxel, radius, mat):
     ng.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
     gin = ng.nodes.new("NodeGroupInput"); gout = ng.nodes.new("NodeGroupOutput")
     p2v = ng.nodes.new("GeometryNodePointsToVolume")
-    p2v.resolution_mode = "VOXEL_SIZE"
+    # Voxel-size mode: enum property on Blender <=4.x, menu input on 5.x.
+    if hasattr(p2v, "resolution_mode"):
+        p2v.resolution_mode = "VOXEL_SIZE"
+    elif "Resolution Mode" in p2v.inputs:
+        p2v.inputs["Resolution Mode"].default_value = "Size"
     p2v.inputs["Voxel Size"].default_value = voxel
     p2v.inputs["Radius"].default_value = radius
     sm = ng.nodes.new("GeometryNodeSetMaterial"); sm.inputs["Material"].default_value = mat

@@ -36,9 +36,35 @@ PTYPE_DM, PTYPE_STAR, PTYPE_GAS = 0, 1, 2
 
 
 # ============================================================ snapshot reading
+def _import_h5py():
+    """Import h5py, falling back to the user site-packages.
+
+    When the extension is installed, its bundled h5py wheel is on the path.  When
+    this module is run standalone (``blender --python loader.py``, the GUI's
+    animation button), Blender does not add the user site by default -- so a
+    user-level ``pip install h5py`` into Blender's Python would otherwise be
+    missed.  Add the user site and retry once.
+    """
+    try:
+        import h5py
+        return h5py
+    except ModuleNotFoundError:
+        try:
+            import site
+            extra = site.getusersitepackages()
+            paths = [extra] if isinstance(extra, str) else list(extra)
+            for p in paths:
+                if p and p not in sys.path:
+                    sys.path.append(p)
+        except Exception:
+            pass
+        import h5py            # retry; raises a clear error if still missing
+        return h5py
+
+
 def read_snapshot(path: str) -> dict:
     """Minimal HDF5 snapshot read (mirrors core.state.State.save layout)."""
-    import h5py
+    h5py = _import_h5py()
 
     with h5py.File(path, "r") as f:
         d = {"pos": f["pos"][:], "ptype": f["ptype"][:],
@@ -194,6 +220,21 @@ def points_modifier(obj, radius, mat):
     obj.modifiers.new("Points", "NODES").node_group = ng
 
 
+def _set_voxel_size_mode(p2v):
+    """Select voxel-size resolution on a Points-to-Volume node, cross-version.
+
+    Blender <=4.x exposes a ``resolution_mode`` enum property; Blender 5.x moved
+    it to a "Resolution Mode" menu input socket (values "Amount"/"Size").
+    """
+    try:
+        if hasattr(p2v, "resolution_mode"):
+            p2v.resolution_mode = "VOXEL_SIZE"
+        elif "Resolution Mode" in p2v.inputs:
+            p2v.inputs["Resolution Mode"].default_value = "Size"
+    except Exception:
+        pass  # fall back to the node's default (Amount) mode
+
+
 def volume_modifier(obj, voxel, radius, mat):
     ng = bpy.data.node_groups.new(obj.name + "_vol", "GeometryNodeTree")
     ng.interface.new_socket("Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
@@ -201,7 +242,7 @@ def volume_modifier(obj, voxel, radius, mat):
     gin = ng.nodes.new("NodeGroupInput")
     gout = ng.nodes.new("NodeGroupOutput")
     p2v = ng.nodes.new("GeometryNodePointsToVolume")
-    p2v.resolution_mode = "VOXEL_SIZE"
+    _set_voxel_size_mode(p2v)
     p2v.inputs["Voxel Size"].default_value = voxel
     p2v.inputs["Radius"].default_value = radius
     sm = ng.nodes.new("GeometryNodeSetMaterial")

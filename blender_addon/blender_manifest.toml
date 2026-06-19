@@ -24,6 +24,7 @@ files = "Read the chosen simulation folder's snapshot files"
 paths_exclude_pattern = [
     "__pycache__/",
     "*.blend1",
+    "*.zip",
     "fetch_wheels.py",
     "README.md",
 ]
