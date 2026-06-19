@@ -203,7 +203,8 @@ def build_scene(spec):
         from core.gas_disk_engine import GasDiskEngine
         pot = (dict(M_d=0.0, a=1.0, b=1.0, M_h=0.0, a_h=1.0)
                if kind == "impact" else None)
-        eng = GasDiskEngine(pot=pot, softening=soft)
+        # Planetary impacts keep their shock heat (no cooling); gas disks cool.
+        eng = GasDiskEngine(pot=pot, softening=soft, cooling=(kind != "impact"))
         eng.setup(a["pos"], a["vel"], a["mass"], a["u"])
         return eng, dt
 

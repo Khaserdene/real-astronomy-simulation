@@ -139,11 +139,14 @@ _NO_POTENTIAL = dict(M_d=0.0, a=1.0, b=1.0, M_h=0.0, a_h=1.0)
 
 def build_scenario(name: str, n: int = 20000, seed: int = 0,
                    overrides: dict | None = None,
-                   gravity_mode: str = "direct", theta: float = 0.6):
+                   gravity_mode: str = "direct", theta: float = 0.6,
+                   engine_params: dict | None = None):
     """Build a scenario's engine (ICs loaded) and return (engine, dt).
 
     ``gravity_mode`` (``"direct"`` | ``"bh"``) selects the gravity solver for
     gravity-kind scenarios; ``"bh"`` is the Barnes-Hut treecode for large N.
+    ``engine_params`` carries the physics knobs (cooling/u_floor/t_cool,
+    sf_prob, du_sn) edited in the GUI's Physics panel.
     """
     if name not in SCENARIOS:
         raise KeyError(f"unknown scenario '{name}'. Have: {list(SCENARIOS)}")
@@ -151,6 +154,7 @@ def build_scenario(name: str, n: int = 20000, seed: int = 0,
     p = dict(sc.params)
     if overrides:
         p.update({k: v for k, v in overrides.items() if v is not None})
+    ep = engine_params or {}
 
     if sc.kind == "gravity":
         from core.scene import Scene, build_state
@@ -166,7 +170,7 @@ def build_scenario(name: str, n: int = 20000, seed: int = 0,
         from core.gas_disk_engine import GasDiskEngine
         pos, vel, mass, u = make_gas_disk(
             n=n, seed=seed, sound_speed=p.get("sound_speed", 12.0))
-        eng = GasDiskEngine(softening=sc.softening)
+        eng = GasDiskEngine(softening=sc.softening, **_cool_kw(ep))
         eng.setup(pos, vel, mass, u)
         return eng, sc.dt
 
@@ -175,8 +179,9 @@ def build_scenario(name: str, n: int = 20000, seed: int = 0,
         from core.living_galaxy_engine import LivingGalaxyEngine
         pos, vel, mass, u = make_gas_disk(n=n, seed=seed)
         eng = LivingGalaxyEngine(softening=sc.softening,
-                                 sf_prob=p.get("sf_prob", 0.03),
-                                 du_sn=p.get("du_sn", 500.0))
+                                 sf_prob=ep.get("sf_prob", p.get("sf_prob", 0.03)),
+                                 du_sn=ep.get("du_sn", p.get("du_sn", 500.0)),
+                                 **_cool_kw(ep))
         eng.setup(pos, vel, mass, u)
         return eng, sc.dt
 
@@ -186,7 +191,8 @@ def build_scenario(name: str, n: int = 20000, seed: int = 0,
         pos, vel, mass, u, species = make_full_galaxy(n=n, seed=seed)
         eng = LivingGalaxyEngine(
             pot=dict(_NO_POTENTIAL), softening=sc.softening,   # fully live gravity
-            sf_prob=p.get("sf_prob", 0.03), du_sn=p.get("du_sn", 400.0))
+            sf_prob=ep.get("sf_prob", p.get("sf_prob", 0.03)),
+            du_sn=ep.get("du_sn", p.get("du_sn", 400.0)), **_cool_kw(ep))
         eng.setup(pos, vel, mass, u, species=species)
         return eng, sc.dt
 
@@ -197,11 +203,20 @@ def build_scenario(name: str, n: int = 20000, seed: int = 0,
             n_each=max(n // 2, 1), seed=seed,
             v_approach=p.get("v_approach", 30.0),
             impact_param=p.get("impact_param", 1.6))
-        eng = GasDiskEngine(pot=dict(_NO_POTENTIAL), softening=sc.softening)
+        # Planetary impact: no radiative cooling -- keep the shock heat (glow).
+        eng = GasDiskEngine(pot=dict(_NO_POTENTIAL), softening=sc.softening,
+                            cooling=False)
         eng.setup(pos, vel, mass, u)
         return eng, sc.dt
 
     raise ValueError(f"unhandled scenario kind: {sc.kind}")
+
+
+def _cool_kw(ep: dict) -> dict:
+    """Cooling keyword args for the SPH engines, from engine_params."""
+    return dict(cooling=ep.get("cooling", True),
+                u_floor=ep.get("u_floor", 60.0),
+                t_cool=ep.get("t_cool", 0.02))
 
 
 def resume_scenario(name: str, state, spec=None):

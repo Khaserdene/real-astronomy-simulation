@@ -31,6 +31,16 @@ class Settings:
     out_dir: str = "output/gui_run"
     gravity_mode: str = "direct"   # "direct" (N^2) | "bh" (Barnes-Hut treecode)
     theta: float = 0.6
+    # Physics (engine) parameters -- edited in the GUI's Physics panel.
+    cooling: bool = True           # radiative cooling of gas
+    u_floor: float = 60.0          # cooling temperature floor [(km/s)^2]
+    t_cool: float = 0.02           # cooling timescale [code units]
+    sf_prob: float = 0.03          # star-formation probability / step (eligible gas)
+    du_sn: float = 400.0           # supernova feedback energy per event
+
+    def engine_params(self) -> dict:
+        return dict(cooling=self.cooling, u_floor=self.u_floor,
+                    t_cool=self.t_cool, sf_prob=self.sf_prob, du_sn=self.du_sn)
 
 
 class SimController:
@@ -48,7 +58,8 @@ class SimController:
     def build(self, overrides: dict | None = None) -> str:
         self.engine, self.dt = build_scenario(
             self.s.scenario, n=self.s.n, seed=self.s.seed, overrides=overrides,
-            gravity_mode=self.s.gravity_mode, theta=self.s.theta)
+            gravity_mode=self.s.gravity_mode, theta=self.s.theta,
+            engine_params=self.s.engine_params())
         self.spec = SceneSpec.single(
             self.s.scenario, self.s.n, self.s.seed, overrides)
         self.spec.gravity_mode = self.s.gravity_mode

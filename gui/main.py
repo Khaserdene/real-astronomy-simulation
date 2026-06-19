@@ -85,6 +85,14 @@ class MainWindow(QMainWindow):
         # --- scene ---
         scene_box = QGroupBox("Scene")
         sf = QFormLayout(scene_box)
+        # Curated presets: one click loads a tuned, good-looking configuration.
+        from core.presets import PRESETS
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItem("— custom —", None)
+        for _pname in PRESETS:
+            self.preset_combo.addItem(_pname, _pname)
+        self.preset_combo.currentIndexChanged.connect(self._on_preset)
+        sf.addRow("Preset", self.preset_combo)
         self.scenario_combo = QComboBox()
         for name, sc in SCENARIOS.items():
             self.scenario_combo.addItem(sc.label, name)
@@ -126,6 +134,9 @@ class MainWindow(QMainWindow):
         self.builder_btn = QPushButton("Scene builder… (compose objects)")
         self.builder_btn.clicked.connect(self._on_scene_builder)
         sf.addRow(self.builder_btn)
+        self.physics_btn = QPushButton("Physics settings…")
+        self.physics_btn.clicked.connect(self._on_physics)
+        sf.addRow(self.physics_btn)
 
         self._update_n_warn(self.n_spin.value())
         v.addWidget(scene_box)
@@ -301,6 +312,26 @@ class MainWindow(QMainWindow):
         self.timeline.follow_live()
         self._refresh_timeline()
         self._refresh_view()
+
+    def _on_preset(self):
+        name = self.preset_combo.currentData()
+        if not name:
+            return
+        from core.presets import apply_preset
+        apply_preset(self.ctrl.s, name)
+        i = self.scenario_combo.findData(self.ctrl.s.scenario)
+        if i >= 0:
+            self.scenario_combo.setCurrentIndex(i)
+        self.n_spin.setValue(self.ctrl.s.n)
+        self.seed_spin.setValue(self.ctrl.s.seed)
+        self._set_status(f"preset '{name}' loaded — press Build")
+
+    def _on_physics(self):
+        from gui.physics_dialog import PhysicsDialog
+        from PyQt6.QtWidgets import QDialog
+        dlg = PhysicsDialog(self.ctrl.s, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._set_status("physics settings updated — press Build")
 
     def _on_build(self):
         # Guard: rebuilding after continuing a loaded folder with a different N
