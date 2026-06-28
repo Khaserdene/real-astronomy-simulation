@@ -36,6 +36,7 @@ class Viewport(gl.GLViewWidget):
         self.brush_enabled = False
         self.brush_mode = "erase"          # "erase" | "add"
         self.brush_radius_px = 25.0
+        self.brush_plane_z = 0.0           # work-plane height (z) for Add depth
         self._painting = False
         self._erase_samples: list = []
 
@@ -47,9 +48,10 @@ class Viewport(gl.GLViewWidget):
         p = ev.position()
         if self.brush_mode == "erase":
             self._erase_samples.append((p.x(), p.y()))
-        else:                              # add: one cluster centre per press
+        else:                              # add: drop on the work plane (z=plane_z)
             world = screen_ray_to_plane(p.x(), p.y(), self.width(),
-                                        self.height(), self._mvp(), 0.0)
+                                        self.height(), self._mvp(),
+                                        self.brush_plane_z)
             if world is not None:
                 self.addAt.emit(world)
 

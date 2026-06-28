@@ -38,11 +38,13 @@ def gas_density(pos: ti.template(), mass: ti.template(), rho: ti.template(),
 
 
 @ti.kernel
-def update_h_gas(rho: ti.template(), mass: ti.template(), h: ti.template(),
-                 is_star: ti.template(), n: ti.i32, eta: ti.f64):
+def update_h_gas(mass: ti.template(), rho: ti.template(), h: ti.template(),
+                 is_star: ti.template(), n: ti.i32, eta: ti.f64, min_h: ti.f64):
+    """Update smoothing length h for gas from density with a minimum floor."""
     for i in range(n):
         if is_star[i] == 0:
-            h[i] = eta * (mass[i] / rho[i]) ** (1.0 / 3.0)
+            new_h = eta * (mass[i] / ti.max(rho[i], 1e-12)) ** (1.0 / 3.0)
+            h[i] = ti.max(new_h, min_h)
 
 
 @ti.kernel
@@ -116,7 +118,8 @@ def add_acc(acc: ti.template(), acc_g: ti.template(), n: ti.i32):
 @ti.kernel
 def grav_analytic(pos: ti.template(), acc: ti.template(), n: ti.i32,
                   M_d: ti.f64, a: ti.f64, b: ti.f64,
-                  M_h: ti.f64, a_h: ti.f64):
+                  M_h: ti.f64, a_h: ti.f64,
+                  is_hernquist: ti.i32, smbh_mass: ti.f64):
     """Add the analytic disk (Miyamoto-Nagai) + halo potential to acc.
 
     A no-op when ``M_d == M_h == 0`` (the fully-live galaxy case), so it is safe
@@ -130,8 +133,16 @@ def grav_analytic(pos: ti.template(), acc: ti.template(), n: ti.i32,
         invD3 = (R2 + aS * aS) ** (-1.5)
         av = ti.Vector([-G * M_d * pi.x * invD3, -G * M_d * pi.y * invD3,
                         -G * M_d * pi.z * aS * invD3 / S], dt=ti.f64)
-        rh = R2 + pi.z * pi.z + a_h * a_h
-        av += -(G * M_h * rh ** (-1.5)) * pi
+        if is_hernquist == 1:
+            r = pi.norm()
+            r_safe = ti.max(r, 1e-6)
+            av += -(G * M_h / ((r_safe + a_h) ** 2 * r_safe)) * pi
+        else:
+            rh = R2 + pi.z * pi.z + a_h * a_h
+            av += -(G * M_h * rh ** (-1.5)) * pi
+        if smbh_mass > 0.0:
+            r_safe = pi.norm() + 1e-6
+            av += -(G * smbh_mass / (r_safe * r_safe * r_safe)) * pi
         acc[i] += av
 
 
@@ -155,23 +166,31 @@ def mark_supernovae(is_star: ti.template(), birth: ti.template(),
         exploding[i] = 0
         if is_star[i] == 1 and sn_done[i] == 0 and (time - birth[i]) >= t_sn:
             sn_done[i] = 1
-            exploding[i] = 1
+            if ti.random(ti.f64) < 0.05:
+                exploding[i] = 2  # Hypernova
+            else:
+                exploding[i] = 1  # Supernova
 
 
 @ti.kernel
-def feedback(pos: ti.template(), u: ti.template(), is_star: ti.template(),
-             exploding: ti.template(), n: ti.i32, r_fb: ti.f64, du_sn: ti.f64):
-    """Inject thermal energy into gas around each exploding star."""
+def feedback(pos: ti.template(), vel: ti.template(), u: ti.template(), h: ti.template(), is_star: ti.template(),
+             exploding: ti.template(), n: ti.i32, r_fb: ti.f64, du_sn: ti.f64, v_sn: ti.f64):
+    """Inject thermal and kinetic energy into gas around each exploding star using adaptive radius."""
     for j in range(n):
         if is_star[j] == 0:
             pj = pos[j]
-            add = 0.0
+            h_fb = ti.min(h[j] * 2.0, r_fb)
             for i in range(n):
-                if exploding[i] == 1:
-                    if (pos[i] - pj).norm() < r_fb:
-                        add += du_sn
-            if add > 0.0:
-                u[j] += add
+                if exploding[i] > 0:
+                    dir = pj - pos[i]
+                    r = dir.norm()
+                    if r < h_fb:
+                        mult = 10.0 if exploding[i] == 2 else 1.0
+                        u[j] += du_sn * mult
+                        
+                        dir_norm = dir / ti.max(r, 1e-6)
+                        kick = v_sn * mult * (1.0 - r / h_fb)
+                        vel[j] += dir_norm * kick
 
 
 @ti.kernel
@@ -184,9 +203,23 @@ def kick(vel: ti.template(), acc: ti.template(), u: ti.template(),
 
 
 @ti.kernel
-def drift(pos: ti.template(), vel: ti.template(), n: ti.i32, dt: ti.f64):
+def drift(pos: ti.template(), vel: ti.template(), n: ti.i32, dt: ti.f64, max_v: ti.f64):
     for i in range(n):
+        # Prevent CFL violations / numerical explosions
+        v_sq = vel[i].norm_sqr()
+        if v_sq > max_v * max_v:
+            vel[i] = vel[i] * (max_v / ti.sqrt(v_sq))
         pos[i] += vel[i] * dt
+
+
+@ti.kernel
+def return_mass(is_star: ti.template(), exploding: ti.template(), sn_done: ti.template(), u: ti.template(), n: ti.i32):
+    """Return exploding stars back to gas (mass return) with reset thermal energy."""
+    for i in range(n):
+        if exploding[i] > 0:
+            is_star[i] = 0
+            sn_done[i] = 0
+            u[i] = 100.0  # Hot recycled gas
 
 
 @ti.kernel
@@ -313,20 +346,19 @@ def gas_forces_grid(pos: ti.template(), vel: ti.template(), mass: ti.template(),
 
 
 @ti.kernel
-def feedback_grid(pos: ti.template(), u: ti.template(), is_star: ti.template(),
+def feedback_grid(pos: ti.template(), vel: ti.template(), u: ti.template(), h: ti.template(), is_star: ti.template(),
                   exploding: ti.template(), n: ti.i32, r_fb: ti.f64,
-                  du_sn: ti.f64, gsort: ti.template(),
+                  du_sn: ti.f64, v_sn: ti.f64, gsort: ti.template(),
                   cell_start: ti.template(), nx: ti.i32, ny: ti.i32, nz: ti.i32,
                   lox: ti.f64, loy: ti.f64, loz: ti.f64, inv_cell: ti.f64):
-    """Inject SN energy into nearby gas, walking the grid from each exploder.
-
-    Loops over exploding stars (rare) instead of over gas, scattering ``du_sn``
-    into each gas neighbour within ``r_fb`` (the grid cell size is >= r_fb, so
-    the 3x3x3 stencil is exact).  Equivalent to the N^2 ``feedback`` kernel.
-    """
+    """Inject SN energy and momentum into nearby gas, walking the grid from each exploder."""
     for i in range(n):
-        if exploding[i] == 1:
+        if exploding[i] > 0:
             pi = pos[i]
+            mult = 10.0 if exploding[i] == 2 else 1.0
+            eff_du = du_sn * mult
+            eff_v = v_sn * mult
+            
             cx, cy, cz = _cell_of(pi, lox, loy, loz, inv_cell, nx, ny, nz)
             for dx in range(-1, 2):
                 bx = cx + dx
@@ -341,16 +373,24 @@ def feedback_grid(pos: ti.template(), u: ti.template(), is_star: ti.template(),
                                     for s in range(cell_start[c],
                                                    cell_start[c + 1]):
                                         j = gsort[s]
-                                        if is_star[j] == 0 and (
-                                                pos[j] - pi).norm() < r_fb:
-                                            ti.atomic_add(u[j], du_sn)
+                                        if is_star[j] == 0:
+                                            dir = pos[j] - pi
+                                            r = dir.norm()
+                                            h_fb = ti.min(h[j] * 2.0, r_fb)
+                                            if r < h_fb:
+                                                ti.atomic_add(u[j], eff_du)
+                                                dir_norm = dir / ti.max(r, 1e-6)
+                                                kick = eff_v * (1.0 - r / h_fb)
+                                                ti.atomic_add(vel[j][0], dir_norm[0] * kick)
+                                                ti.atomic_add(vel[j][1], dir_norm[1] * kick)
+                                                ti.atomic_add(vel[j][2], dir_norm[2] * kick)
 
 
 class LivingGalaxyEngine:
     def __init__(self, pot=None, gamma=5.0 / 3.0, alpha=1.0, beta=2.0,
                  eta=1.3, softening=0.2,
                  sf_density_factor=8.0, sf_prob=0.05,
-                 t_sn=0.02, r_fb=0.6, du_sn=400.0,
+                 t_sn=0.02, r_fb=0.6, du_sn=400.0, v_sn=50.0,
                  cooling=True, u_floor=60.0, t_cool=0.02,
                  gravity_mode="direct", theta=0.6):
         self.pot = pot or dict(M_d=5.0, a=3.0, b=0.3, M_h=12.0, a_h=8.0)
@@ -364,7 +404,8 @@ class LivingGalaxyEngine:
         # Uniform-grid neighbour search for the SPH kernels (built for large N).
         self._grid = None
         self.sf_density_factor = sf_density_factor
-        self.sf_prob, self.t_sn, self.r_fb, self.du_sn = sf_prob, t_sn, r_fb, du_sn
+        self.sf_prob, self.t_sn, self.r_fb = sf_prob, t_sn, r_fb
+        self.du_sn, self.v_sn = du_sn, v_sn
         # Radiative cooling (gas only): relax u toward u_floor on timescale t_cool.
         self.cooling = bool(cooling)
         self.u_floor = float(u_floor)
@@ -446,9 +487,11 @@ class LivingGalaxyEngine:
     def _density_h(self, iters=3):
         f = self._f
         for _ in range(iters):
+            # 1. Update SPH smoothing lengths from old density
+            # Enforce min_h to prevent 1/h^4 force singularities in dense clumps
+            min_h = self.softening * 0.25
+            update_h_gas(f["mass"], f["rho"], f["h"], f["is_star"], self.n, self.eta, min_h)
             self._gas_density()
-            update_h_gas(f["rho"], f["mass"], f["h"], f["is_star"], self.n, self.eta)
-        self._gas_density()
 
     def _forces(self):
         f = self._f
@@ -476,28 +519,35 @@ class LivingGalaxyEngine:
         # Analytic disk+halo potential (a no-op when M_d == M_h == 0).
         grav_analytic(f["pos"], f["acc"], self.n,
                       self.pot["M_d"], self.pot["a"], self.pot["b"],
-                      self.pot["M_h"], self.pot["a_h"])
+                      self.pot["M_h"], self.pot["a_h"],
+                      int(self.pot.get("is_hernquist", 0)),
+                      float(self.pot.get("smbh_mass", 0.0)))
 
     def step(self, dt):
         f = self._f
         half = 0.5 * dt
         kick(f["vel"], f["acc"], f["u"], f["du"], f["is_star"], self.n, half)
-        drift(f["pos"], f["vel"], self.n, dt)
+        drift(f["pos"], f["vel"], self.n, dt, 1000.0)
         self.time += dt
         self._density_h()
         form_stars(f["rho"], f["is_star"], f["birth"], self.n, self.time,
                    self._rho_thresh, self.sf_prob)
         mark_supernovae(f["is_star"], f["birth"], f["sn_done"], f["exploding"],
                         self.n, self.time, self.t_sn)
+        
         if self._grid_ready():
             g = self._grid
-            feedback_grid(f["pos"], f["u"], f["is_star"], f["exploding"], self.n,
-                          self.r_fb, self.du_sn, g.gsort, g.cell_start,
+            feedback_grid(f["pos"], f["vel"], f["u"], f["h"], f["is_star"], f["exploding"], self.n,
+                          self.r_fb, self.du_sn, self.v_sn, g.gsort, g.cell_start,
                           g.nx, g.ny, g.nz, g.lo[0], g.lo[1], g.lo[2],
                           g.inv_cell)
         else:
-            feedback(f["pos"], f["u"], f["is_star"], f["exploding"], self.n,
-                     self.r_fb, self.du_sn)
+            feedback(f["pos"], f["vel"], f["u"], f["h"], f["is_star"], f["exploding"], self.n,
+                     self.r_fb, self.du_sn, self.v_sn)
+                     
+        # Mass return: Exploded stars become gas again
+        return_mass(f["is_star"], f["exploding"], f["sn_done"], f["u"], self.n)
+        
         self._forces()
         kick(f["vel"], f["acc"], f["u"], f["du"], f["is_star"], self.n, half)
         if self.cooling and self.inv_tcool > 0.0:

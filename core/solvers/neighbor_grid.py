@@ -92,3 +92,45 @@ class NeighborGrid:
         self.lo = (float(lo[0]), float(lo[1]), float(lo[2]))
         self.inv_cell = 1.0 / cell
         return self.ngas
+
+    def rebuild_all(self, pos_field, h_field) -> int:
+        """Bin all particles. For pure-gas engines where every particle is gas."""
+        pos = pos_field.to_numpy()
+        h = h_field.to_numpy()
+        gas = np.arange(self.n, dtype=np.int32)
+        self.ngas = self.n
+        if self.ngas == 0:
+            return 0
+
+        gpos = pos
+        h_max = float(h.max())
+        cell = max(2.0 * h_max, self.min_radius)
+        cell = cell if cell > 1e-9 else 1.0
+
+        lo = gpos.min(axis=0)
+        span = gpos.max(axis=0) - lo
+        dims = np.maximum(np.floor(span / cell).astype(np.int64) + 1, 1)
+        # Keep the cell count within budget: grow the cells if the box is huge.
+        while int(dims.prod()) > self.max_cells:
+            cell *= 1.3
+            dims = np.maximum(np.floor(span / cell).astype(np.int64) + 1, 1)
+        n_cells = int(dims.prod())
+
+        ijk = np.clip(((gpos - lo) / cell).astype(np.int64), 0, dims - 1)
+        flat = (ijk[:, 0] * dims[1] + ijk[:, 1]) * dims[2] + ijk[:, 2]
+        order = np.argsort(flat, kind="stable")
+        sorted_global = gas[order]
+        counts = np.bincount(flat, minlength=n_cells)
+        starts = np.empty(n_cells + 1, np.int32)
+        starts[0] = 0
+        starts[1:] = np.cumsum(counts).astype(np.int32)
+
+        self.gsort.from_numpy(sorted_global)
+        cs = np.zeros(self.max_cells + 1, np.int32)
+        cs[:n_cells + 1] = starts
+        self.cell_start.from_numpy(cs)
+
+        self.nx, self.ny, self.nz = int(dims[0]), int(dims[1]), int(dims[2])
+        self.lo = (float(lo[0]), float(lo[1]), float(lo[2]))
+        self.inv_cell = 1.0 / cell
+        return self.ngas

@@ -106,6 +106,6 @@ def _sample_exponential_disk(rng, n, Rd, z0):
 
 def _sample_plummer_positions(rng, n, a):
     """Sample isotropic Plummer positions with scale radius ``a``."""
-    x1 = rng.random(n)
+    x1 = rng.uniform(0.0, 0.999, n)
     r = a / np.sqrt(x1 ** (-2.0 / 3.0) - 1.0)
     return _random_directions(rng, n) * r[:, None]

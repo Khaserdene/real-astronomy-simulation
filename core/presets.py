@@ -28,6 +28,12 @@ PRESETS: dict[str, dict] = {
         scenario="cosmo", n=30000, gravity_mode="bh"),
     "Giant impact (planetary)": dict(
         scenario="impact", n=16000, gravity_mode="direct", cooling=False),
+    "Realistic Galaxy (real)": dict(
+        scenario="realistic_galaxy", n=40000, gravity_mode="bh",
+        cooling=True, u_floor=45.0, t_cool=0.015, sf_prob=0.02, du_sn=350.0, v_sn=80.0),
+    "Proto Galaxy Collapse (real)": dict(
+        scenario="proto_galaxy_collapse", n=40000, gravity_mode="bh",
+        cooling=True, u_floor=50.0, t_cool=0.02, sf_prob=0.04, du_sn=350.0, v_sn=100.0),
 }
 
 

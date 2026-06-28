@@ -84,20 +84,18 @@ switch. (The checkbox label already says "applies on Build".)
 
 ## 3. Open items for the next session
 
-1. **🔴 Barnes-Hut is non-deterministic (real bug, found this session).**
-   `core/solvers/barnes_hut.py` `_bottom_up` has a memory-visibility race: two
-   identical `compute()` calls on the *same* positions can differ by up to ~4%
-   (`verify`: build BH, call `compute` twice, diff). Cause: a thread that finalizes
-   a parent node reads a sibling subtree's `com`/`nmass` that another thread wrote
-   with a plain (non-atomic) store, ordered only by the `flag` atomic — no
-   acquire/release fence, so the read can be stale. This affects **both** the
-   `Engine` and the galaxy engine's BH path. Taichi 's `taichi.simt` module is not
-   importable in this build, so a device `__threadfence()` isn't obviously
-   available — options to investigate: (a) accumulate node COM via `atomic_add`
-   instead of the "second-arriver computes from children" scheme, (b) a separate
-   level-ordered bottom-up pass, (c) check the installed Taichi version for any
-   fence primitive. Until fixed, **use `gravity_mode="direct"` for any test that
-   needs a deterministic gravity reference.**
+1. **✅ FIXED (2026-06-19) — Barnes-Hut non-determinism.**
+   `core/solvers/barnes_hut.py` `_bottom_up` had a memory-visibility race (a
+   thread finalizing a parent read a sibling subtree's plain non-atomic
+   `com`/`nmass` with no fence → stale, ~4% non-deterministic). **Fixed** with
+   option (a): the flag/second-arriver scheme was replaced by race-free atomic
+   accumulation — `_accumulate` has each leaf `atomic_add` its mass/moment and
+   `atomic_min/max` its AABB into *every* ancestor, then `_finalize` sets
+   internal COM = moment/mass (`flag` removed, `nmom` added). Verified on CUDA:
+   two `compute()` calls now agree to 5.8e-11 (was ~4%), root mass exact (10.0,
+   was 9.956), force median err 0.47%, `verify_bh_galaxy.py` KE within 0.19% of
+   direct, all 8 scenarios + `verify_grid_sph.py` still pass. BH is now safe as a
+   deterministic reference. (Change is local-only — not yet committed/pushed.)
 
 2. **SPH still doesn't reach the grid's potential for the full step.** The grid is
    correct and exact, but the per-density-pass `rebuild()` pulls `pos`/`h`/`is_star`

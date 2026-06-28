@@ -37,10 +37,12 @@ class Settings:
     t_cool: float = 0.02           # cooling timescale [code units]
     sf_prob: float = 0.03          # star-formation probability / step (eligible gas)
     du_sn: float = 400.0           # supernova feedback energy per event
+    v_sn: float = 50.0             # supernova kinetic kick velocity
+    live_halo: bool = True         # Use N-body DM instead of analytic potential
 
     def engine_params(self) -> dict:
         return dict(cooling=self.cooling, u_floor=self.u_floor,
-                    t_cool=self.t_cool, sf_prob=self.sf_prob, du_sn=self.du_sn)
+                    t_cool=self.t_cool, sf_prob=self.sf_prob, du_sn=self.du_sn, v_sn=self.v_sn)
 
 
 class SimController:
@@ -56,8 +58,10 @@ class SimController:
 
     # --------------------------------------------------------------- building
     def build(self, overrides: dict | None = None) -> str:
+        ov = overrides.copy() if overrides else {}
+        ov["live_halo"] = getattr(self.s, "live_halo", True)
         self.engine, self.dt = build_scenario(
-            self.s.scenario, n=self.s.n, seed=self.s.seed, overrides=overrides,
+            self.s.scenario, n=self.s.n, seed=self.s.seed, overrides=ov,
             gravity_mode=self.s.gravity_mode, theta=self.s.theta,
             engine_params=self.s.engine_params())
         self.spec = SceneSpec.single(

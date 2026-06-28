@@ -50,6 +50,22 @@ OBJECTS: dict[str, ObjectTemplate] = {
         dt=3e-5, softening=0.05,
         defaults=dict(total_mass=10.0, scale_radius=1.0),
         description="Equilibrium spherical blob of collisionless particles."),
+    "realistic_galaxy": ObjectTemplate(
+        "realistic_galaxy", "Realistic galaxy", "galaxy", "galaxy",
+        dt=5e-4, softening=0.2,
+        defaults=dict(live_halo=True, smbh_mass=0.1, disk_mass=4.0, disk_scale=3.0,
+                      disk_height=0.3, gas_mass=1.0, bulge_mass=1.0, bulge_scale=1.0,
+                      halo_mass=40.0, halo_scale=15.0, toomre_q=1.5, proto=False),
+        description="A mathematically balanced realistic galaxy with SMBH, Bulge, Disk, and Gas."
+    ),
+    "proto_galaxy_collapse": ObjectTemplate(
+        "proto_galaxy_collapse", "Proto galaxy collapse", "galaxy", "galaxy",
+        dt=5e-4, softening=0.2,
+        defaults=dict(live_halo=True, smbh_mass=0.1, disk_mass=4.0, disk_scale=3.0,
+                      disk_height=0.3, gas_mass=1.0, bulge_mass=1.0, bulge_scale=1.0,
+                      halo_mass=40.0, halo_scale=15.0, toomre_q=1.5, proto=True),
+        description="A warm gas cloud that collapses into a disk."
+    ),
     "gas_disk": ObjectTemplate(
         "gas_disk", "Gas disk", "galaxy", "gas",
         dt=5e-4, softening=0.2,
@@ -100,6 +116,22 @@ def build_object(template: str, n: int, seed: int, params: dict | None = None):
     p = dict(tmpl.defaults)
     if params:
         p.update({k: v for k, v in params.items() if v is not None})
+
+    if template in ("realistic_galaxy", "proto_galaxy_collapse"):
+        from core.ic.realistic_galaxy import make_realistic_galaxy
+        pos, vel, mass, u, species = make_realistic_galaxy(
+            n=n, seed=seed,
+            live_halo=p["live_halo"], smbh_mass=p["smbh_mass"],
+            disk_mass=p["disk_mass"], disk_scale=p["disk_scale"], disk_height=p["disk_height"],
+            gas_mass=p["gas_mass"], bulge_mass=p["bulge_mass"], bulge_scale=p["bulge_scale"],
+            halo_mass=p["halo_mass"], halo_scale=p["halo_scale"],
+            toomre_q=p["toomre_q"], proto=p["proto"])
+        from core.state import PTYPE_GAS, PTYPE_STAR, PTYPE_DM
+        ptype = np.zeros(len(pos), dtype=np.int32)
+        ptype[species == 0] = PTYPE_GAS
+        ptype[species == 1] = PTYPE_STAR
+        ptype[species == 2] = PTYPE_DM
+        return dict(pos=pos, vel=vel, mass=mass, ptype=ptype, u=u)
 
     if template == "disk_galaxy":
         from core.ic.disk import make_disk_galaxy
@@ -206,6 +238,19 @@ def build_scene(spec):
         # Planetary impacts keep their shock heat (no cooling); gas disks cool.
         eng = GasDiskEngine(pot=pot, softening=soft, cooling=(kind != "impact"))
         eng.setup(a["pos"], a["vel"], a["mass"], a["u"])
+        return eng, dt
+
+    if kind == "galaxy":
+        from core.living_galaxy_engine import LivingGalaxyEngine
+        from core.state import PTYPE_STAR, PTYPE_DM
+        eng = LivingGalaxyEngine(
+            pot=dict(M_d=0.0, a=1.0, b=1.0, M_h=0.0, a_h=1.0), softening=soft,
+            gravity_mode="direct", theta=0.6,
+            sf_prob=0.03, du_sn=400.0)
+        species = np.zeros(len(a["pos"]), dtype=np.int32)
+        species[a["ptype"] == PTYPE_STAR] = 1
+        species[a["ptype"] == PTYPE_DM] = 2
+        eng.setup(a["pos"], a["vel"], a["mass"], a["u"], species=species)
         return eng, dt
 
     raise ValueError(f"unhandled scene kind: {kind}")

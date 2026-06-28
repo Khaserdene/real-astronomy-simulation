@@ -51,10 +51,21 @@ class MainWindow(QMainWindow):
         self.viewport.eraseStroke.connect(self._on_erase_stroke)
         self.viewport.addAt.connect(self._on_add_at)
 
+        # The control panel is taller than a 1080p screen, so put it in a scroll
+        # area -- it scrolls instead of squashing the buttons when space is tight.
+        from PyQt6.QtWidgets import QScrollArea
+        panel_scroll = QScrollArea()
+        panel_scroll.setWidgetResizable(True)
+        panel_scroll.setWidget(self._build_panel())
+        panel_scroll.setFixedWidth(322)
+        panel_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        panel_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+
         top = QWidget()
         top_row = QHBoxLayout(top)
         top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.addWidget(self._build_panel(), 0)
+        top_row.addWidget(panel_scroll, 0)
         top_row.addWidget(self.viewport, 1)
 
         self.timeline = TimelineWidget()
@@ -101,6 +112,13 @@ class MainWindow(QMainWindow):
         self.seed_spin.setValue(7)
         sf.addRow("Scenario", self.scenario_combo)
         sf.addRow("Seed", self.seed_spin)
+        
+        self.live_halo_check = QCheckBox("Live Halo (N-body Dark Matter)")
+        self.live_halo_check.setToolTip("Use N-body particles for Dark Matter instead of analytic potential (where supported).")
+        self.live_halo_check.setChecked(True)
+        self.live_halo_check.toggled.connect(
+            lambda c: setattr(self.ctrl.s, "live_halo", c))
+        sf.addRow(self.live_halo_check)
 
         # --- particle count: free spin box + quick presets ---
         self.n_spin = QSpinBox()
@@ -203,6 +221,11 @@ class MainWindow(QMainWindow):
         self.add_radius_spin = QDoubleSpinBox()
         self.add_radius_spin.setRange(0.2, 30.0); self.add_radius_spin.setValue(3.0)
         bf.addRow("Add radius kpc", self.add_radius_spin)
+        # Work plane: Add drops on z = plane; Erase removes near that layer.
+        self.plane_slider, plane_row = _slider("Plane Z kpc", -60, 60, 0)
+        self.plane_slider.valueChanged.connect(
+            lambda val: setattr(self.viewport, "brush_plane_z", float(val)))
+        bf.addRow(plane_row)
         v.addWidget(brush_box)
 
         # --- output / checkpoints ---
@@ -431,6 +454,11 @@ class MainWindow(QMainWindow):
         from gui.brush import pick_radius
         pos = self.ctrl.engine.to_state().pos
         within = np.linalg.norm(pos, axis=1) < _CLIP_KPC
+        # Restrict erase to the work-plane layer (a slab around z = plane) so it
+        # stays consistent with the Add plane and doesn't punch through depth.
+        plane_z = self.viewport.brush_plane_z
+        slab = max(self.add_radius_spin.value() * 2.0, 6.0)
+        within &= np.abs(pos[:, 2] - plane_z) < slab
         mask = np.zeros(len(pos), bool)
         for (mx, my) in samples:
             mask |= pick_radius(pos, mvp, w, h, mx, my, radius)

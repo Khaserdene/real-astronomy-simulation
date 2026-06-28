@@ -143,3 +143,92 @@ def compute_hydro_forces(pos: ti.template(), vel: ti.template(),
             dudt += 0.5 * mass[j] * coeff * dv.dot(grad)
         acc[i] = a
         du[i] = dudt
+
+
+@ti.func
+def _cell_of(pi, lox: ti.f64, loy: ti.f64, loz: ti.f64, inv_cell: ti.f64,
+             nx: ti.i32, ny: ti.i32, nz: ti.i32):
+    cx = ti.min(ti.max(ti.i32((pi.x - lox) * inv_cell), 0), nx - 1)
+    cy = ti.min(ti.max(ti.i32((pi.y - loy) * inv_cell), 0), ny - 1)
+    cz = ti.min(ti.max(ti.i32((pi.z - loz) * inv_cell), 0), nz - 1)
+    return cx, cy, cz
+
+
+@ti.kernel
+def compute_density_grid(pos: ti.template(), mass: ti.template(),
+                         rho: ti.template(), h: ti.template(), n: ti.i32,
+                         gsort: ti.template(), cell_start: ti.template(),
+                         nx: ti.i32, ny: ti.i32, nz: ti.i32,
+                         lox: ti.f64, loy: ti.f64, loz: ti.f64, inv_cell: ti.f64):
+    for i in range(n):
+        acc = 0.0
+        pi = pos[i]
+        hi = h[i]
+        cx, cy, cz = _cell_of(pi, lox, loy, loz, inv_cell, nx, ny, nz)
+        for dx in range(-1, 2):
+            bx = cx + dx
+            if 0 <= bx < nx:
+                for dy in range(-1, 2):
+                    by = cy + dy
+                    if 0 <= by < ny:
+                        for dz in range(-1, 2):
+                            bz = cz + dz
+                            if 0 <= bz < nz:
+                                c = (bx * ny + by) * nz + bz
+                                for s in range(cell_start[c], cell_start[c + 1]):
+                                    j = gsort[s]
+                                    r = (pos[j] - pi).norm()
+                                    if r < 2.0 * hi:
+                                        acc += mass[j] * cubic_w(r, hi)
+        rho[i] = ti.max(acc, 1e-12)
+
+
+@ti.kernel
+def compute_hydro_forces_grid(pos: ti.template(), vel: ti.template(),
+                              mass: ti.template(), rho: ti.template(),
+                              pressure: ti.template(), cs: ti.template(),
+                              h: ti.template(), acc: ti.template(),
+                              du: ti.template(), n: ti.i32,
+                              alpha: ti.f64, beta: ti.f64,
+                              gsort: ti.template(), cell_start: ti.template(),
+                              nx: ti.i32, ny: ti.i32, nz: ti.i32,
+                              lox: ti.f64, loy: ti.f64, loz: ti.f64, inv_cell: ti.f64):
+    for i in range(n):
+        a = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+        dudt = 0.0
+        pi = pos[i]
+        vi = vel[i]
+        pr_i = pressure[i] / (rho[i] * rho[i])
+        cx, cy, cz = _cell_of(pi, lox, loy, loz, inv_cell, nx, ny, nz)
+        for dx in range(-1, 2):
+            bx = cx + dx
+            if 0 <= bx < nx:
+                for dy in range(-1, 2):
+                    by = cy + dy
+                    if 0 <= by < ny:
+                        for dz in range(-1, 2):
+                            bz = cz + dz
+                            if 0 <= bz < nz:
+                                c = (bx * ny + by) * nz + bz
+                                for s in range(cell_start[c], cell_start[c + 1]):
+                                    j = gsort[s]
+                                    if j != i:
+                                        dr = pi - pos[j]
+                                        r = dr.norm()
+                                        hij = 0.5 * (h[i] + h[j])
+                                        if 1e-12 < r < 2.0 * hij:
+                                            dv = vi - vel[j]
+                                            pr_j = pressure[j] / (rho[j] * rho[j])
+                                            visc = 0.0
+                                            dvdr = dv.dot(dr)
+                                            if dvdr < 0.0:
+                                                mu = hij * dvdr / (r * r + 0.01 * hij * hij)
+                                                c_bar = 0.5 * (cs[i] + cs[j])
+                                                rho_bar = 0.5 * (rho[i] + rho[j])
+                                                visc = (-alpha * c_bar * mu + beta * mu * mu) / rho_bar
+                                            grad = cubic_dwdr(r, hij) * (dr / r)
+                                            coeff = pr_i + pr_j + visc
+                                            a += -mass[j] * coeff * grad
+                                            dudt += 0.5 * mass[j] * coeff * dv.dot(grad)
+        acc[i] = a
+        du[i] = dudt

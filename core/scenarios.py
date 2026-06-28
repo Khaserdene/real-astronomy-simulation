@@ -34,6 +34,19 @@ class Scenario:
 
 # Registry. ``params`` are the handful of knobs worth exposing in the GUI.
 SCENARIOS: dict[str, Scenario] = {
+    "empty": Scenario(
+        "empty", "Empty (brush canvas)", "gravity", dt=1e-4, softening=0.1,
+        description="A blank canvas — build it, then paint particles with the "
+                    "3D brush (Add mode) on the work plane.",
+        details=(
+            "PHYSICS  Collisionless gravity over whatever you paint. Starts with a "
+            "single faint seed particle; use the Brush panel (Enable → Add) to "
+            "drop stars/DM on the work plane, then Run to watch them evolve.\n"
+            "WHAT YOU SEE  Nothing until you paint. Great for sketching custom "
+            "configurations by hand.\n"
+            "PARAMS  none — set the brush type/count/radius and work-plane depth "
+            "in the Brush panel."),
+        params={}),
     "disk": Scenario(
         "disk", "Disk galaxy", "gravity", dt=1e-4, softening=0.1,
         description="A rotating stellar disk in a dark-matter halo.",
@@ -102,6 +115,26 @@ SCENARIOS: dict[str, Scenario] = {
             "PARAMS  sf_prob (per-step SF probability of eligible gas), du_sn "
             "(energy injected per supernova)."),
         params={"sf_prob": 0.03, "du_sn": 500.0}),
+    "realistic_galaxy": Scenario(
+        "realistic_galaxy", "Realistic Galaxy", "galaxy", dt=5e-4, softening=0.2,
+        description="A mathematically balanced realistic galaxy (SMBH, DM, Bulge, Disk, Gas).",
+        details=(
+            "PHYSICS  Uses Hernquist and Toomre Q dispersion profiles to ensure equilibrium.\n"
+            "WHAT YOU SEE  A disk that naturally forms spirals and bars.\n"
+            "PARAMS  live_halo (True/False to use N-body vs Analytic DM)."
+        ),
+        params={"live_halo": True, "toomre_q": 1.5, "sf_prob": 0.03, "du_sn": 400.0}
+    ),
+    "proto_galaxy_collapse": Scenario(
+        "proto_galaxy_collapse", "Proto Galaxy Collapse", "galaxy", dt=5e-4, softening=0.2,
+        description="A warm gas cloud that collapses into a disk over time.",
+        details=(
+            "PHYSICS  Gas cools and settles into a disk.\n"
+            "WHAT YOU SEE  Formation of a disk.\n"
+            "PARAMS  live_halo."
+        ),
+        params={"live_halo": True, "sf_prob": 0.04, "du_sn": 350.0}
+    ),
     "galaxy": Scenario(
         "galaxy", "Full galaxy (stars+DM+gas)", "galaxy", dt=5e-4, softening=0.2,
         description="A complete galaxy: stars, a live dark-matter halo and SPH "
@@ -119,6 +152,53 @@ SCENARIOS: dict[str, Scenario] = {
             "NOTE  Uses direct N² gravity — heavier than the split scenarios; a "
             "Barnes-Hut tree is the planned speed-up for large N."),
         params={"sf_prob": 0.03, "du_sn": 400.0}),
+    "galaxy_merger": Scenario(
+        "galaxy_merger", "Galaxy merger (live, gas+stars+DM)", "galaxy",
+        dt=5e-4, softening=0.2,
+        description="Two full galaxies (stars + live DM + gas) collide: tidal "
+                    "tails plus gas shocks and triggered star formation.",
+        details=(
+            "PHYSICS  Two complete galaxies — each stars + a live dark-matter "
+            "halo + SPH gas with star formation & SN feedback — placed on an "
+            "approaching orbit; everything self-gravitates (live, no analytic "
+            "potential). The richest merger here.\n"
+            "WHAT YOU SEE  Tidal tails and bridges (collisionless), shocked gas "
+            "and a starburst of young blue stars where the gas piles up, then a "
+            "merger remnant. Use Fast gravity (BH) for large N.\n"
+            "PARAMS  separation (kpc), v_approach (km/s), impact_param (kpc), "
+            "inclination (deg of the 2nd disk), sf_prob, du_sn."),
+        params={"separation": 60.0, "v_approach": 120.0, "impact_param": 15.0,
+                "inclination": 30.0, "sf_prob": 0.03, "du_sn": 400.0}),
+    "cosmos": Scenario(
+        "cosmos", "Living cosmos (web + gas + stars)", "galaxy",
+        dt=5e-5, softening=0.22,
+        description="Cosmological box with baryons: dark matter + gas that cools "
+                    "and forms stars in the cosmic-web knots.",
+        details=(
+            "PHYSICS  A Zel'dovich-perturbed box (cosmic web) where a fraction of "
+            "the matter is gas. Live self-gravity over DM + gas, SPH hydro, "
+            "radiative cooling, star formation & feedback — the 'living' version "
+            "of the cosmic-web scenario.\n"
+            "WHAT YOU SEE  Matter drains into filaments and knots; gas cools at "
+            "the nodes and lights up as the first stars/galaxies.\n"
+            "PARAMS  sf_prob, du_sn (cooling via the Physics panel). Use Fast "
+            "gravity (BH) — many particles.\n"
+            "NOTE  Isolated (non-periodic) box, like cosmo."),
+        params={"sf_prob": 0.03, "du_sn": 350.0}),
+    "formation": Scenario(
+        "formation", "Galaxy formation (gas → disk → stars)", "galaxy",
+        dt=5e-4, softening=0.2,
+        description="A warm rotating gas cloud in a DM halo cools, settles into a "
+                    "disk, and turns into stars — composition evolves over time.",
+        details=(
+            "PHYSICS  A live dark-matter halo + a warm, slowly-rotating gas cloud. "
+            "With cooling on, the gas radiates energy, collapses along its spin "
+            "axis into a rotationally-supported disk, and forms stars — so the "
+            "baryon mix evolves from gas-dominated to star-dominated.\n"
+            "WHAT YOU SEE  A diffuse gas blob spinning up, flattening into a disk, "
+            "then growing a young stellar disk from the inside out.\n"
+            "PARAMS  sf_prob, du_sn; cooling (Physics panel) is essential here."),
+        params={"sf_prob": 0.04, "du_sn": 350.0}),
     "impact": Scenario(
         "impact", "Giant impact", "impact", dt=5e-4, softening=0.1,
         description="Two self-gravitating bodies collide (shock heating).",
@@ -156,6 +236,18 @@ def build_scenario(name: str, n: int = 20000, seed: int = 0,
         p.update({k: v for k, v in overrides.items() if v is not None})
     ep = engine_params or {}
 
+    if name == "empty":
+        import numpy as np
+        from core.engine import Engine
+        from core.state import State, PTYPE_STAR
+        # A single faint seed particle at the origin; paint the rest with the brush.
+        state = State(pos=np.zeros((1, 3)), vel=np.zeros((1, 3)),
+                      mass=np.full(1, 1e-6), ptype=np.full(1, PTYPE_STAR, np.int32),
+                      ids=np.arange(1, dtype=np.int64))
+        eng = Engine(softening=sc.softening, gravity_mode=gravity_mode, theta=theta)
+        eng.load_state(state)
+        return eng, sc.dt
+
     if sc.kind == "gravity":
         from core.scene import Scene, build_state
         from core.engine import Engine
@@ -170,7 +262,8 @@ def build_scenario(name: str, n: int = 20000, seed: int = 0,
         from core.gas_disk_engine import GasDiskEngine
         pos, vel, mass, u = make_gas_disk(
             n=n, seed=seed, sound_speed=p.get("sound_speed", 12.0))
-        eng = GasDiskEngine(softening=sc.softening, **_cool_kw(ep))
+        eng = GasDiskEngine(softening=sc.softening, gravity_mode=gravity_mode,
+                            theta=theta, **_cool_kw(ep))
         eng.setup(pos, vel, mass, u)
         return eng, sc.dt
 
@@ -187,11 +280,38 @@ def build_scenario(name: str, n: int = 20000, seed: int = 0,
         return eng, sc.dt
 
     if sc.kind == "galaxy":
-        from core.ic.full_galaxy import make_full_galaxy
         from core.living_galaxy_engine import LivingGalaxyEngine
-        pos, vel, mass, u, species = make_full_galaxy(n=n, seed=seed)
+        if name == "galaxy_merger":
+            from core.ic.full_galaxy import make_galaxy_merger
+            pos, vel, mass, u, species = make_galaxy_merger(
+                n=n, seed=seed,
+                separation=p.get("separation", 60.0),
+                v_approach=p.get("v_approach", 120.0),
+                impact_param=p.get("impact_param", 15.0),
+                inclination=p.get("inclination", 30.0))
+            pot = dict(_NO_POTENTIAL)
+        elif name == "cosmos":
+            from core.ic.full_galaxy import make_cosmo_baryon
+            pos, vel, mass, u, species = make_cosmo_baryon(n=n, seed=seed)
+            pot = dict(_NO_POTENTIAL)
+        elif name == "formation":
+            from core.ic.full_galaxy import make_protogalaxy
+            pos, vel, mass, u, species = make_protogalaxy(n=n, seed=seed)
+            pot = dict(_NO_POTENTIAL)
+        elif name in ("realistic_galaxy", "proto_galaxy_collapse"):
+            from core.ic.realistic_galaxy import make_realistic_galaxy
+            live_halo = p.get("live_halo", True)
+            pos, vel, mass, u, species = make_realistic_galaxy(
+                n=n, seed=seed, live_halo=live_halo,
+                toomre_q=p.get("toomre_q", 1.5), proto=(name == "proto_galaxy_collapse"))
+            pot = dict(_NO_POTENTIAL) if live_halo else dict(
+                M_d=0.0, a=1.0, b=1.0, M_h=40.0, a_h=15.0, is_hernquist=1, smbh_mass=0.1)
+        else:
+            from core.ic.full_galaxy import make_full_galaxy
+            pos, vel, mass, u, species = make_full_galaxy(n=n, seed=seed)
+            pot = dict(_NO_POTENTIAL)
         eng = LivingGalaxyEngine(
-            pot=dict(_NO_POTENTIAL), softening=sc.softening,   # fully live gravity
+            pot=pot, softening=sc.softening,
             gravity_mode=gravity_mode, theta=theta,
             sf_prob=ep.get("sf_prob", p.get("sf_prob", 0.03)),
             du_sn=ep.get("du_sn", p.get("du_sn", 400.0)), **_cool_kw(ep))
@@ -207,7 +327,7 @@ def build_scenario(name: str, n: int = 20000, seed: int = 0,
             impact_param=p.get("impact_param", 1.6))
         # Planetary impact: no radiative cooling -- keep the shock heat (glow).
         eng = GasDiskEngine(pot=dict(_NO_POTENTIAL), softening=sc.softening,
-                            cooling=False)
+                            cooling=False, gravity_mode=gravity_mode, theta=theta)
         eng.setup(pos, vel, mass, u)
         return eng, sc.dt
 
@@ -257,7 +377,9 @@ def resume_scenario(name: str, state, spec=None):
     if kind in ("gas", "impact"):
         from core.gas_disk_engine import GasDiskEngine
         pot = dict(_NO_POTENTIAL) if kind == "impact" else None
-        eng = GasDiskEngine(pot=pot, softening=softening)
+        eng = GasDiskEngine(pot=pot, softening=softening,
+                            gravity_mode=gmode, theta=gtheta,
+                            cooling=(kind != "impact"))
         eng.setup(state.pos, state.vel, state.mass,
                   state.u if state.u is not None else _default_u(state.n))
         eng.time, eng.step_count = state.time, state.step

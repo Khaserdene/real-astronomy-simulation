@@ -14,8 +14,14 @@ blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
 
 # Reads the engine's snap_*.h5 directly. Blender bundles numpy, but not h5py,
-# so the matching h5py wheel (CPython 3.11, win_amd64 for Blender 4.5) is bundled.
-wheels = ["./wheels/h5py-3.16.0-cp311-cp311-win_amd64.whl"]
+# so the matching h5py wheels are bundled (win_amd64). Blender picks the one
+# matching its interpreter: CPython 3.11 = Blender 4.2–4.5, 3.12 = Blender 5.0,
+# 3.13 = Blender 5.1+.
+wheels = [
+    "./wheels/h5py-3.16.0-cp311-cp311-win_amd64.whl",
+    "./wheels/h5py-3.16.0-cp312-cp312-win_amd64.whl",
+    "./wheels/h5py-3.16.0-cp313-cp313-win_amd64.whl",
+]
 
 [permissions]
 files = "Read the chosen simulation folder's snapshot files"

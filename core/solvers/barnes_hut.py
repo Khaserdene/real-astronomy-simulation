@@ -124,7 +124,7 @@ def _build_radix(code: ti.template(), left: ti.template(),
 @ti.kernel
 def _leaf_init(order: ti.template(), pos: ti.template(),
                mass: ti.template(), com: ti.template(), nmass: ti.template(),
-               nmin: ti.template(), nmax: ti.template(), flag: ti.template(),
+               nmom: ti.template(), nmin: ti.template(), nmax: ti.template(),
                n: ti.i32):
     for li in range(n):
         p = order[li]
@@ -133,34 +133,48 @@ def _leaf_init(order: ti.template(), pos: ti.template(),
         nmin[li] = pos[p]
         nmax[li] = pos[p]
     for ii in range(n - 1):
-        flag[ii] = 0
-        nmass[ii + n] = 0.0
+        node = ii + n
+        nmass[node] = 0.0
+        nmom[node] = ti.Vector([0.0, 0.0, 0.0], dt=ti.f64)
+        nmin[node] = ti.Vector([1e30, 1e30, 1e30], dt=ti.f64)
+        nmax[node] = ti.Vector([-1e30, -1e30, -1e30], dt=ti.f64)
 
 
 @ti.kernel
-def _bottom_up(parent: ti.template(), left: ti.template(),
-               right: ti.template(), com: ti.template(), nmass: ti.template(),
-               nmin: ti.template(), nmax: ti.template(), flag: ti.template(),
-               n: ti.i32):
-    """Propagate COM / mass / AABB from leaves to the root (one thread per leaf)."""
+def _accumulate(parent: ti.template(), com: ti.template(),
+                nmass: ti.template(), nmom: ti.template(),
+                nmin: ti.template(), nmax: ti.template(), n: ti.i32):
+    """Race-free bottom-up: each leaf adds its mass / moment / AABB to *every*
+    ancestor via atomics.
+
+    Every contribution is counted exactly once and order-independently, so the
+    result does not depend on thread scheduling.  This replaces the old
+    "second-arriver computes the parent from its children" scheme, which read a
+    sibling subtree's plain (non-atomic) stores with no memory fence and could
+    therefore see stale values (non-deterministic ~4% COM/mass errors).
+    """
     for li in range(n):
+        m = nmass[li]
+        pp = com[li]
         node = parent[li]
         while node >= 0:
-            ii = node - n
-            done = ti.atomic_add(flag[ii], 1)
-            if done == 0:
-                node = -1                 # first child here: stop, wait for sibling
-            else:
-                lc = left[ii]
-                rc = right[ii]
-                ml = nmass[lc]
-                mr = nmass[rc]
-                mt = ml + mr
-                nmass[node] = mt
-                com[node] = (com[lc] * ml + com[rc] * mr) / mt
-                nmin[node] = ti.min(nmin[lc], nmin[rc])
-                nmax[node] = ti.max(nmax[lc], nmax[rc])
-                node = parent[node]
+            ti.atomic_add(nmass[node], m)
+            for k in ti.static(range(3)):
+                ti.atomic_add(nmom[node][k], m * pp[k])
+                ti.atomic_min(nmin[node][k], pp[k])
+                ti.atomic_max(nmax[node][k], pp[k])
+            node = parent[node]
+
+
+@ti.kernel
+def _finalize(com: ti.template(), nmass: ti.template(), nmom: ti.template(),
+              n: ti.i32):
+    """Internal-node centre of mass = accumulated moment / accumulated mass."""
+    for ii in range(n - 1):
+        node = ii + n
+        m = nmass[node]
+        if m > 0.0:
+            com[node] = nmom[node] / m
 
 
 @ti.kernel
@@ -216,13 +230,13 @@ class BarnesHut:
         self.code = ti.field(ti.i64, shape=max(n, 1))
         self.order = ti.field(ti.i32, shape=max(n, 1))
         self.com = ti.Vector.field(3, ti.f64, shape=m)
+        self.nmom = ti.Vector.field(3, ti.f64, shape=m)   # accumulated mass-moment
         self.nmass = ti.field(ti.f64, shape=m)
         self.nmin = ti.Vector.field(3, ti.f64, shape=m)
         self.nmax = ti.Vector.field(3, ti.f64, shape=m)
         self.left = ti.field(ti.i32, shape=max(n - 1, 1))
         self.right = ti.field(ti.i32, shape=max(n - 1, 1))
         self.parent = ti.field(ti.i32, shape=m)
-        self.flag = ti.field(ti.i32, shape=max(n - 1, 1))
         self.stack = ti.field(ti.i32, shape=(max(n, 1), max_stack))
 
     def compute(self, pos_field, mass_field, acc_field):
@@ -236,9 +250,10 @@ class BarnesHut:
         self.parent.from_numpy(np.full(2 * n - 1, -1, np.int32))
         _build_radix(self.code, self.left, self.right, self.parent, n)
         _leaf_init(self.order, pos_field, mass_field, self.com, self.nmass,
-                   self.nmin, self.nmax, self.flag, n)
-        _bottom_up(self.parent, self.left, self.right, self.com, self.nmass,
-                   self.nmin, self.nmax, self.flag, n)
+                   self.nmom, self.nmin, self.nmax, n)
+        _accumulate(self.parent, self.com, self.nmass, self.nmom,
+                    self.nmin, self.nmax, n)
+        _finalize(self.com, self.nmass, self.nmom, n)
         _traverse(pos_field, self.order, self.com, self.nmass, self.nmin,
                   self.nmax, self.left, self.right, acc_field, self.stack,
                   n, n, self.theta2, self.eps2, self.max_stack)
