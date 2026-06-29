@@ -4,10 +4,6 @@ Each preset is a set of controller settings (scenario, particle count, gravity
 solver, and the physics knobs) chosen to produce a recognisable, "looks like a
 real galaxy/merger/web" outcome without hand-tuning.  Selecting a preset in the
 GUI fills those settings in; the user can still tweak afterwards.
-
-(A future option is automatic tuning -- searching parameters against a target --
-but that needs an objective metric and many runs; these hand-tuned presets are
-the practical starting point.)
 """
 from __future__ import annotations
 
@@ -15,10 +11,14 @@ from __future__ import annotations
 PRESETS: dict[str, dict] = {
     "Realistic spiral galaxy": dict(
         scenario="galaxy", n=40000, gravity_mode="bh",
-        cooling=True, u_floor=45.0, t_cool=0.015, sf_prob=0.02, du_sn=350.0),
+        cooling=True, u_floor=45.0, t_cool=0.015,
+        eps_ff=0.01, du_sn=350.0, v_sn=50.0,
+        t_sn_max=0.05, r_fb=0.6, f_return=0.4),
     "Living galaxy (stars from gas)": dict(
         scenario="living", n=30000, gravity_mode="direct",
-        cooling=True, u_floor=55.0, t_cool=0.02, sf_prob=0.03, du_sn=500.0),
+        cooling=True, u_floor=55.0, t_cool=0.02,
+        eps_ff=0.015, du_sn=500.0, v_sn=50.0,
+        t_sn_max=0.04, r_fb=0.6, f_return=0.35),
     "Gas-rich disk (cool, thin)": dict(
         scenario="gas", n=30000, gravity_mode="direct",
         cooling=True, u_floor=40.0, t_cool=0.01),
@@ -30,10 +30,17 @@ PRESETS: dict[str, dict] = {
         scenario="impact", n=16000, gravity_mode="direct", cooling=False),
     "Realistic Galaxy (real)": dict(
         scenario="realistic_galaxy", n=40000, gravity_mode="bh",
-        cooling=True, u_floor=45.0, t_cool=0.015, sf_prob=0.02, du_sn=350.0, v_sn=80.0),
+        cooling=True, u_floor=45.0, t_cool=0.015,
+        eps_ff=0.01, du_sn=400.0, v_sn=60.0,
+        t_sn_max=0.05, r_fb=0.6, f_return=0.4),
     "Proto Galaxy Collapse (real)": dict(
         scenario="proto_galaxy_collapse", n=40000, gravity_mode="bh",
-        cooling=True, u_floor=50.0, t_cool=0.02, sf_prob=0.04, du_sn=350.0, v_sn=100.0),
+        cooling=True, u_floor=50.0, t_cool=0.025,
+        # Feedback strong enough that supernovae are actually visible (heated gas
+        # glows magenta/white) and drive outflows; was 50/10 which was invisible.
+        eps_ff=0.008, du_sn=300.0, v_sn=40.0,
+        sf_density_factor=12.0,
+        t_sn_max=0.05, r_fb=0.8, f_return=0.35),
 }
 
 

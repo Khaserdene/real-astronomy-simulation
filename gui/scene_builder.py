@@ -112,19 +112,47 @@ class SceneBuilderDialog(QDialog):
         return box
 
     # --------------------------------------------------- dynamic parameter form
+    _NOISE_LABELS = ["clumps", "spiral", "filaments", "shells", "smooth"]
+
     def _rebuild_param_fields(self, template: str):
-        """Replace the parameter widgets with one spin box per template default."""
+        """Replace the parameter widgets with one editor per template default."""
         while self.param_form.rowCount():
             self.param_form.removeRow(0)
         self._param_spins = {}
         for key, default in OBJECTS[template].defaults.items():
-            spin = self._param_spin(key, float(default))
-            self.param_form.addRow(key, spin)
-            self._param_spins[key] = spin
+            if key == "noise_pattern":            # categorical -> dropdown
+                w = QComboBox()
+                for i, lbl in enumerate(self._NOISE_LABELS):
+                    w.addItem(lbl, i)
+                w.setCurrentIndex(int(default))
+                w.currentIndexChanged.connect(self._write_back)
+            else:
+                w = self._param_spin(key, float(default))
+            self.param_form.addRow(key, w)
+            self._param_spins[key] = w
+
+    @staticmethod
+    def _param_get(w) -> float:
+        return float(w.currentData()) if isinstance(w, QComboBox) else w.value()
+
+    @staticmethod
+    def _param_set(w, val) -> None:
+        if isinstance(w, QComboBox):
+            w.setCurrentIndex(int(val))
+        else:
+            w.setValue(float(val))
 
     def _param_spin(self, key: str, default: float) -> QDoubleSpinBox:
         s = QDoubleSpinBox()
-        if "frac" in key:                       # fractions: 0..1
+        if key == "noise_pattern":               # categorical index 0..4
+            s.setRange(0.0, 4.0); s.setDecimals(0); s.setSingleStep(1.0)
+            s.setToolTip("0=clumps 1=spiral 2=filaments 3=shells 4=smooth")
+        elif key == "noise_octaves":             # small integer
+            s.setRange(1.0, 8.0); s.setDecimals(0); s.setSingleStep(1.0)
+        elif key == "noise_seed":                # integer seed
+            s.setRange(0.0, 9999.0); s.setDecimals(0); s.setSingleStep(1.0)
+            s.setToolTip("Perlin noise seed — changes the random structure")
+        elif "frac" in key:                      # fractions: 0..1
             s.setRange(0.0, 1.0); s.setDecimals(3); s.setSingleStep(0.05)
         else:
             s.setRange(0.0, 1.0e5); s.setDecimals(3)
@@ -202,9 +230,9 @@ class SceneBuilderDialog(QDialog):
             self.vel[k].setValue(float(o.velocity[k]))
         self.spin_spin.setValue(float(o.spin or 0.0))
         self._rebuild_param_fields(o.template)
-        for key, spin in self._param_spins.items():
-            spin.setValue(float(o.params.get(key,
-                          OBJECTS[o.template].defaults[key])))
+        for key, w in self._param_spins.items():
+            self._param_set(w, o.params.get(key,
+                            OBJECTS[o.template].defaults[key]))
         self.desc_label.setText(OBJECTS[o.template].description)
         self._loading = False
 
@@ -219,7 +247,8 @@ class SceneBuilderDialog(QDialog):
         o.position = [c.value() for c in self.pos]
         o.velocity = [c.value() for c in self.vel]
         o.spin = self.spin_spin.value() or None
-        o.params = {key: spin.value() for key, spin in self._param_spins.items()}
+        o.params = {key: self._param_get(w)
+                    for key, w in self._param_spins.items()}
         self.obj_list.item(row).setText(self._summary(o))
 
     def _accept(self):

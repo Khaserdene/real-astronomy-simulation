@@ -114,7 +114,7 @@ SCENARIOS: dict[str, Scenario] = {
             "fountains from SN, the disk slowly converting gas to stars.\n"
             "PARAMS  sf_prob (per-step SF probability of eligible gas), du_sn "
             "(energy injected per supernova)."),
-        params={"sf_prob": 0.03, "du_sn": 500.0}),
+        params={"eps_ff": 0.015, "du_sn": 500.0}),
     "realistic_galaxy": Scenario(
         "realistic_galaxy", "Realistic Galaxy", "galaxy", dt=5e-4, softening=0.2,
         description="A mathematically balanced realistic galaxy (SMBH, DM, Bulge, Disk, Gas).",
@@ -123,17 +123,27 @@ SCENARIOS: dict[str, Scenario] = {
             "WHAT YOU SEE  A disk that naturally forms spirals and bars.\n"
             "PARAMS  live_halo (True/False to use N-body vs Analytic DM)."
         ),
-        params={"live_halo": True, "toomre_q": 1.5, "sf_prob": 0.03, "du_sn": 400.0}
+        params={"live_halo": True, "toomre_q": 1.5, "eps_ff": 0.01, "du_sn": 400.0}
     ),
     "proto_galaxy_collapse": Scenario(
         "proto_galaxy_collapse", "Proto Galaxy Collapse", "galaxy", dt=5e-4, softening=0.2,
-        description="A warm gas cloud that collapses into a disk over time.",
+        description="A warm, clumpy gas cloud that cools and collapses into a disk.",
         details=(
-            "PHYSICS  Gas cools and settles into a disk.\n"
-            "WHAT YOU SEE  Formation of a disk.\n"
-            "PARAMS  live_halo."
+            "PHYSICS  A warm, turbulent gas cloud in a live dark-matter halo. The "
+            "gas starts with substructure (noise_pattern) and partial rotation "
+            "(rotation_frac); radiative cooling lets it lose pressure support and "
+            "collapse along its spin axis into a rotating disk, then form stars.\n"
+            "WHAT YOU SEE  A diffuse, clumpy blob spinning up and flattening into a "
+            "disk; cold clumps lighting up as the first young stars.\n"
+            "PARAMS  noise_pattern (0=clumps 1=spiral 2=filaments 3=shells "
+            "4=smooth), rotation_frac (0=radial collapse, 1=spin-supported), "
+            "turbulence, radial_infall, live_halo. Cooling (Physics panel) is "
+            "essential here."
         ),
-        params={"live_halo": True, "sf_prob": 0.04, "du_sn": 350.0}
+        params={"live_halo": True, "eps_ff": 0.008, "du_sn": 350.0,
+                "noise_pattern": 0, "noise_scale": 1.0, "noise_octaves": 4,
+                "clump_sharpness": 3.0, "rotation_frac": 0.8,
+                "turbulence": 40.0, "radial_infall": 0.0}
     ),
     "galaxy": Scenario(
         "galaxy", "Full galaxy (stars+DM+gas)", "galaxy", dt=5e-4, softening=0.2,
@@ -151,7 +161,7 @@ SCENARIOS: dict[str, Scenario] = {
             "DM split scales with N.\n"
             "NOTE  Uses direct N² gravity — heavier than the split scenarios; a "
             "Barnes-Hut tree is the planned speed-up for large N."),
-        params={"sf_prob": 0.03, "du_sn": 400.0}),
+        params={"eps_ff": 0.01, "du_sn": 400.0}),
     "galaxy_merger": Scenario(
         "galaxy_merger", "Galaxy merger (live, gas+stars+DM)", "galaxy",
         dt=5e-4, softening=0.2,
@@ -168,7 +178,7 @@ SCENARIOS: dict[str, Scenario] = {
             "PARAMS  separation (kpc), v_approach (km/s), impact_param (kpc), "
             "inclination (deg of the 2nd disk), sf_prob, du_sn."),
         params={"separation": 60.0, "v_approach": 120.0, "impact_param": 15.0,
-                "inclination": 30.0, "sf_prob": 0.03, "du_sn": 400.0}),
+                "inclination": 30.0, "eps_ff": 0.01, "du_sn": 400.0}),
     "cosmos": Scenario(
         "cosmos", "Living cosmos (web + gas + stars)", "galaxy",
         dt=5e-5, softening=0.22,
@@ -184,7 +194,7 @@ SCENARIOS: dict[str, Scenario] = {
             "PARAMS  sf_prob, du_sn (cooling via the Physics panel). Use Fast "
             "gravity (BH) — many particles.\n"
             "NOTE  Isolated (non-periodic) box, like cosmo."),
-        params={"sf_prob": 0.03, "du_sn": 350.0}),
+        params={"eps_ff": 0.01, "du_sn": 350.0}),
     "formation": Scenario(
         "formation", "Galaxy formation (gas → disk → stars)", "galaxy",
         dt=5e-4, softening=0.2,
@@ -198,7 +208,7 @@ SCENARIOS: dict[str, Scenario] = {
             "WHAT YOU SEE  A diffuse gas blob spinning up, flattening into a disk, "
             "then growing a young stellar disk from the inside out.\n"
             "PARAMS  sf_prob, du_sn; cooling (Physics panel) is essential here."),
-        params={"sf_prob": 0.04, "du_sn": 350.0}),
+        params={"eps_ff": 0.01, "du_sn": 350.0}),
     "impact": Scenario(
         "impact", "Giant impact", "impact", dt=5e-4, softening=0.1,
         description="Two self-gravitating bodies collide (shock heating).",
@@ -273,9 +283,8 @@ def build_scenario(name: str, n: int = 20000, seed: int = 0,
         pos, vel, mass, u = make_gas_disk(n=n, seed=seed)
         eng = LivingGalaxyEngine(softening=sc.softening,
                                  gravity_mode=gravity_mode, theta=theta,
-                                 sf_prob=ep.get("sf_prob", p.get("sf_prob", 0.03)),
                                  du_sn=ep.get("du_sn", p.get("du_sn", 500.0)),
-                                 **_cool_kw(ep))
+                                 **_living_kw(ep, p), **_cool_kw(ep))
         eng.setup(pos, vel, mass, u)
         return eng, sc.dt
 
@@ -303,7 +312,21 @@ def build_scenario(name: str, n: int = 20000, seed: int = 0,
             live_halo = p.get("live_halo", True)
             pos, vel, mass, u, species = make_realistic_galaxy(
                 n=n, seed=seed, live_halo=live_halo,
-                toomre_q=p.get("toomre_q", 1.5), proto=(name == "proto_galaxy_collapse"))
+                toomre_q=p.get("toomre_q", 1.5), proto=(name == "proto_galaxy_collapse"),
+                halo_warmth=p.get("halo_warmth", 1.0),
+                gas_particle_frac=p.get("gas_particle_frac", 0.25),
+                noise_pattern=int(p.get("noise_pattern", 0)),
+                noise_scale=p.get("noise_scale", 1.0),
+                noise_octaves=int(p.get("noise_octaves", 4)),
+                clump_sharpness=p.get("clump_sharpness", 3.0),
+                noise_seed=int(p.get("noise_seed", 0)),
+                noise_frequency=p.get("noise_frequency", 1.0),
+                noise_lacunarity=p.get("noise_lacunarity", 2.0),
+                noise_persistence=p.get("noise_persistence", 0.5),
+                noise_warp=p.get("noise_warp", 0.0),
+                rotation_frac=p.get("rotation_frac", 0.8),
+                turbulence=p.get("turbulence", 40.0),
+                radial_infall=p.get("radial_infall", 0.0))
             pot = dict(_NO_POTENTIAL) if live_halo else dict(
                 M_d=0.0, a=1.0, b=1.0, M_h=40.0, a_h=15.0, is_hernquist=1, smbh_mass=0.1)
         else:
@@ -313,8 +336,8 @@ def build_scenario(name: str, n: int = 20000, seed: int = 0,
         eng = LivingGalaxyEngine(
             pot=pot, softening=sc.softening,
             gravity_mode=gravity_mode, theta=theta,
-            sf_prob=ep.get("sf_prob", p.get("sf_prob", 0.03)),
-            du_sn=ep.get("du_sn", p.get("du_sn", 400.0)), **_cool_kw(ep))
+            du_sn=ep.get("du_sn", p.get("du_sn", 400.0)),
+            **_living_kw(ep, p), **_cool_kw(ep))
         eng.setup(pos, vel, mass, u, species=species)
         return eng, sc.dt
 
@@ -339,6 +362,30 @@ def _cool_kw(ep: dict) -> dict:
     return dict(cooling=ep.get("cooling", True),
                 u_floor=ep.get("u_floor", 60.0),
                 t_cool=ep.get("t_cool", 0.02))
+
+
+def _living_kw(ep: dict, p: dict | None = None) -> dict:
+    """Star-formation and feedback kwargs for LivingGalaxyEngine."""
+    p = p or {}
+    kw = {}
+    kw["eps_ff"] = ep.get("eps_ff", p.get("eps_ff", 0.01))
+    sf_prob = ep.get("sf_prob", p.get("sf_prob", None))
+    if sf_prob is not None:
+        kw["sf_prob"] = sf_prob
+    kw["v_sn"] = ep.get("v_sn", p.get("v_sn", 50.0))
+    kw["t_sn_max"] = ep.get("t_sn_max", p.get("t_sn_max", 0.05))
+    kw["r_fb"] = ep.get("r_fb", p.get("r_fb", 0.6))
+    kw["f_return"] = ep.get("f_return", p.get("f_return", 0.4))
+    kw["sf_density_factor"] = ep.get("sf_density_factor",
+                                      p.get("sf_density_factor", 8.0))
+    # Dynamic-N / baryon-cycle knobs (engine-level, from the Physics panel).
+    for key, default in (("dynamic_baryons", True), ("rebuild_every", 20),
+                         ("sn_gas_split", 4), ("gas_inflow", True),
+                         ("inflow_radius", 40.0), ("escape_radius", 60.0)):
+        val = ep.get(key, p.get(key, None))
+        if val is not None:
+            kw[key] = val
+    return kw
 
 
 def resume_scenario(name: str, state, spec=None):
@@ -392,8 +439,8 @@ def resume_scenario(name: str, state, spec=None):
         eng = LivingGalaxyEngine(
             pot=dict(_NO_POTENTIAL), softening=softening,
             gravity_mode=gmode, theta=gtheta,
-            sf_prob=params.get("sf_prob", 0.03),
-            du_sn=params.get("du_sn", 400.0))
+            du_sn=params.get("du_sn", 400.0),
+            **_living_kw(params))
         species = np.zeros(state.n, np.int32)
         species[state.ptype == PTYPE_STAR] = 1
         species[state.ptype == PTYPE_DM] = 2
@@ -404,6 +451,9 @@ def resume_scenario(name: str, state, spec=None):
         if state.age is not None:
             birth = np.where(state.age >= 0.0, state.time - state.age, 0.0)
             eng._f["birth"].from_numpy(birth.astype(np.float64))
+        if state.metallicity is not None:
+            eng._f["metal"].from_numpy(
+                (np.asarray(state.metallicity) * state.mass).astype(np.float64))
         return eng, dt
 
     if kind == "living":
@@ -412,8 +462,8 @@ def resume_scenario(name: str, state, spec=None):
         from core.state import PTYPE_STAR
         eng = LivingGalaxyEngine(softening=softening,
                                  gravity_mode=gmode, theta=gtheta,
-                                 sf_prob=params.get("sf_prob", 0.03),
-                                 du_sn=params.get("du_sn", 500.0))
+                                 du_sn=params.get("du_sn", 500.0),
+                                 **_living_kw(params))
         eng.setup(state.pos, state.vel, state.mass,
                   state.u if state.u is not None else _default_u(state.n))
         eng.time, eng.step_count = state.time, state.step

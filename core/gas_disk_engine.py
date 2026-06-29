@@ -89,6 +89,21 @@ def add_field(acc: ti.template(), src: ti.template(), n: ti.i32):
 
 
 @ti.kernel
+def _cfl_min_dt(h: ti.template(), cs: ti.template(), vel: ti.template(),
+                acc: ti.template(), n: ti.i32,
+                courant: ti.f64, c_acc: ti.f64, soft: ti.f64) -> ti.f64:
+    """Smallest stable timestep over all gas (SPH Courant + acceleration)."""
+    dt_min = 1.0e30
+    for i in range(n):
+        a_mag = acc[i].norm()
+        if a_mag > 1e-12:
+            ti.atomic_min(dt_min, c_acc * ti.sqrt(soft / a_mag))
+        signal = cs[i] + vel[i].norm() + 1e-6
+        ti.atomic_min(dt_min, courant * h[i] / signal)
+    return dt_min
+
+
+@ti.kernel
 def cool_to_floor(u: ti.template(), n: ti.i32, dt: ti.f64,
                   u_floor: ti.f64, inv_tcool: ti.f64):
     """Radiative cooling: relax internal energy toward a floor.
@@ -110,7 +125,8 @@ class GasDiskEngine:
     def __init__(self, pot=None, gamma=5.0 / 3.0, alpha=1.0, beta=2.0,
                  eta=1.3, softening=0.2,
                  cooling=True, u_floor=60.0, t_cool=0.02,
-                 gravity_mode="direct", theta=0.6):
+                 gravity_mode="direct", theta=0.6,
+                 adaptive=True, courant=0.3, c_acc=0.25, max_substeps=64):
         self.pot = pot or dict(M_d=5.0, a=3.0, b=0.3, M_h=12.0, a_h=8.0)
         self.gamma, self.alpha, self.beta, self.eta = gamma, alpha, beta, eta
         self.softening = float(softening)
@@ -123,6 +139,11 @@ class GasDiskEngine:
         self.cooling = bool(cooling)
         self.u_floor = float(u_floor)
         self.inv_tcool = 1.0 / float(t_cool) if t_cool > 0 else 0.0
+        self.adaptive = bool(adaptive)
+        self.courant = float(courant)
+        self.c_acc = float(c_acc)
+        self.max_substeps = int(max_substeps)
+        self.last_substeps = 1
         self.n = 0
         self.time = 0.0
         self.step_count = 0
@@ -208,18 +229,36 @@ class GasDiskEngine:
                          int(self.pot.get("is_hernquist", 0)),
                          float(self.pot.get("smbh_mass", 0.0)))
 
+    def cfl_dt(self):
+        """The largest stable timestep right now (CFL + acceleration limited)."""
+        f = self._f
+        return float(_cfl_min_dt(f["h"], f["cs"], f["vel"], f["acc"], self.n,
+                                 self.courant, self.c_acc, self.softening))
+
     def step(self, dt):
+        """Advance by total ``dt``, sub-dividing for CFL stability."""
+        n_sub = 1
+        if self.adaptive:
+            stable = self.cfl_dt()
+            if stable > 0.0:
+                n_sub = max(1, min(int(np.ceil(dt / stable)), self.max_substeps))
+        self.last_substeps = n_sub
+        sub = dt / n_sub
+        for _ in range(n_sub):
+            self._substep(sub)
+        self.step_count += 1
+
+    def _substep(self, dt):
         f = self._f
         half = 0.5 * dt
         _kick(f["vel"], f["acc"], f["u"], f["du"], f["frozen"], self.n, half)
         _drift(f["pos"], f["vel"], f["frozen"], self.n, dt)
-        self._density_h()
+        self._density_h(iters=2)
         self._forces()
         _kick(f["vel"], f["acc"], f["u"], f["du"], f["frozen"], self.n, half)
         if self.cooling and self.inv_tcool > 0.0:
             cool_to_floor(f["u"], self.n, dt, self.u_floor, self.inv_tcool)
         self.time += dt
-        self.step_count += 1
 
     def get(self, name):
         return self._f[name].to_numpy()

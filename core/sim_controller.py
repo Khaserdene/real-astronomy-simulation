@@ -35,14 +35,39 @@ class Settings:
     cooling: bool = True           # radiative cooling of gas
     u_floor: float = 60.0          # cooling temperature floor [(km/s)^2]
     t_cool: float = 0.02           # cooling timescale [code units]
-    sf_prob: float = 0.03          # star-formation probability / step (eligible gas)
+    # Star formation (Schmidt law)
+    eps_ff: float = 0.01           # SF efficiency per free-fall time
+    sf_prob: float = 0.0           # legacy flat probability (0 = use eps_ff)
+    sf_density_factor: float = 8.0 # density threshold factor
+    # Supernova / feedback
     du_sn: float = 400.0           # supernova feedback energy per event
     v_sn: float = 50.0             # supernova kinetic kick velocity
+    t_sn_max: float = 0.05         # max SN-capable stellar lifetime (~49 Myr)
+    r_fb: float = 0.6              # feedback radius (kpc)
+    f_return: float = 0.4          # mass return fraction
     live_halo: bool = True         # Use N-body DM instead of analytic potential
+    # Dynamic N / baryon cycle
+    dynamic_baryons: bool = True   # SN->gas, hypernova->BH, escaper removal
+    sn_gas_split: int = 4          # gas particles spawned per supernova
+    gas_inflow: bool = True        # replenish ejected particles as fresh gas
+    inflow_radius: float = 40.0    # outer shell where inflow gas appears (kpc)
+    escape_radius: float = 60.0    # unbound particles removed beyond this (kpc)
+    rebuild_every: int = 20        # steps between dynamic-N rebuilds
 
     def engine_params(self) -> dict:
         return dict(cooling=self.cooling, u_floor=self.u_floor,
-                    t_cool=self.t_cool, sf_prob=self.sf_prob, du_sn=self.du_sn, v_sn=self.v_sn)
+                    t_cool=self.t_cool, eps_ff=self.eps_ff,
+                    sf_prob=self.sf_prob if self.sf_prob > 0 else None,
+                    sf_density_factor=self.sf_density_factor,
+                    du_sn=self.du_sn, v_sn=self.v_sn,
+                    t_sn_max=self.t_sn_max, r_fb=self.r_fb,
+                    f_return=self.f_return,
+                    dynamic_baryons=self.dynamic_baryons,
+                    sn_gas_split=self.sn_gas_split,
+                    gas_inflow=self.gas_inflow,
+                    inflow_radius=self.inflow_radius,
+                    escape_radius=self.escape_radius,
+                    rebuild_every=self.rebuild_every)
 
 
 class SimController:
@@ -54,6 +79,11 @@ class SimController:
         self.continuing = False               # resumed from an existing folder?
         self._frame = 0
         self._since_snap = 0
+        # Energy/virial diagnostics are O(N^2); cache them and refresh every
+        # _diag_every stats() calls so the GUI stays responsive at large N.
+        self._diag_cache: dict | None = None
+        self._diag_count = 0
+        self._diag_every = 25
         self.status = "no simulation -- press Build"
 
     # --------------------------------------------------------------- building
@@ -72,6 +102,7 @@ class SimController:
         self.s.running = False
         self._frame = 0
         self._since_snap = 0
+        self._diag_cache, self._diag_count = None, 0
         self.status = (f"built '{self.s.scenario}' "
                        f"(N={self.engine.n:,}, dt={self.dt:g})")
         return self.status
@@ -88,6 +119,7 @@ class SimController:
         self.s.running = False
         self._frame = 0
         self._since_snap = 0
+        self._diag_cache, self._diag_count = None, 0
         self.status = (f"built scene ({len(spec.objects)} objects, "
                        f"N={self.engine.n:,}, dt={self.dt:g})")
         return self.status
@@ -95,6 +127,7 @@ class SimController:
     def reset(self):
         self.engine = None
         self.s.running = False
+        self._diag_cache, self._diag_count = None, 0
         self.status = "reset -- press Build"
 
     # -------------------------------------------------------------- stepping
@@ -150,6 +183,7 @@ class SimController:
         self._frame = self._next_frame_index(self.s.out_dir)
         self.continuing = True
         self.s.running = False
+        self._diag_cache, self._diag_count = None, 0
         self.status = (f"resumed {os.path.basename(path)} "
                        f"(step {self.engine.step_count}, "
                        f"next frame {self._frame:04d})")
@@ -177,10 +211,10 @@ class SimController:
         return idx + 1
 
     # ----------------------------------------------------------- display data
-    def display_arrays(self, clip_kpc: float = 120.0):
+    def display_arrays(self, clip_kpc: float = 120.0, show_dm: bool = True):
         if self.engine is None:
             return np.zeros((0, 3), np.float32), np.zeros((0, 4), np.float32)
-        return state_to_display(self.engine.to_state(), clip_kpc)
+        return state_to_display(self.engine.to_state(), clip_kpc, show_dm=show_dm)
 
     @staticmethod
     def display_snapshot(path: str, clip_kpc: float = 120.0):
@@ -240,15 +274,45 @@ class SimController:
             return 0.0
         return (self._since_snap % self.s.snap_every) / self.s.snap_every
 
+    def _diagnostics_throttled(self) -> dict | None:
+        """Cached energy/virial diagnostics, refreshed every _diag_every calls."""
+        eng = self.engine
+        if eng is None:
+            return None
+        self._diag_count += 1
+        if self._diag_cache is not None and self._diag_count < self._diag_every:
+            return self._diag_cache
+        self._diag_count = 0
+        try:
+            if hasattr(eng, "diagnostics"):
+                self._diag_cache = eng.diagnostics()
+            elif hasattr(eng, "energies"):
+                ke, pe, tot = eng.energies()
+                self._diag_cache = dict(
+                    kinetic=ke, potential=pe, thermal=0.0, total=tot,
+                    virial=(2.0 * ke / abs(pe) if pe else 0.0))
+        except Exception:
+            pass
+        return self._diag_cache
+
     def stats(self) -> dict:
         if self.engine is None:
             return {"step": 0, "time": 0.0, "n": 0, "energy": None}
-        e = None
-        if hasattr(self.engine, "energies"):
-            e = self.engine.energies()[2]
         extra = {}
         if hasattr(self.engine, "star_count"):
             extra["stars"] = self.engine.star_count()
-        return {"step": self.engine.step_count, "time": self.engine.time,
-                "n": self.engine.n, "energy": e,
-                "scenario": self.s.scenario, **extra}
+        out = {"step": self.engine.step_count, "time": self.engine.time,
+               "n": self.engine.n, "energy": None,
+               "scenario": self.s.scenario, **extra}
+        diag = self._diagnostics_throttled()
+        if diag:
+            out["energy"] = diag.get("total")
+            out["virial"] = diag.get("virial")
+            out["thermal"] = diag.get("thermal")
+            for k in ("substeps", "toomre_q", "smbh_mass", "v_rot",
+                      "gas_count", "star_count", "gas_mass", "star_mass",
+                      "gas_fraction", "gas_metal", "sfr",
+                      "n_sn", "n_hypernova", "n_bh_formed", "n_ejected"):
+                if diag.get(k) is not None:
+                    out[k] = diag[k]
+        return out

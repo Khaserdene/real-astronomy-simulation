@@ -55,7 +55,8 @@ OBJECTS: dict[str, ObjectTemplate] = {
         dt=5e-4, softening=0.2,
         defaults=dict(live_halo=True, smbh_mass=0.1, disk_mass=4.0, disk_scale=3.0,
                       disk_height=0.3, gas_mass=1.0, bulge_mass=1.0, bulge_scale=1.0,
-                      halo_mass=40.0, halo_scale=15.0, toomre_q=1.5, proto=False),
+                      halo_mass=40.0, halo_scale=15.0, toomre_q=1.5, proto=False,
+                      halo_warmth=1.0, gas_particle_frac=0.25),
         description="A mathematically balanced realistic galaxy with SMBH, Bulge, Disk, and Gas."
     ),
     "proto_galaxy_collapse": ObjectTemplate(
@@ -63,8 +64,17 @@ OBJECTS: dict[str, ObjectTemplate] = {
         dt=5e-4, softening=0.2,
         defaults=dict(live_halo=True, smbh_mass=0.1, disk_mass=4.0, disk_scale=3.0,
                       disk_height=0.3, gas_mass=1.0, bulge_mass=1.0, bulge_scale=1.0,
-                      halo_mass=40.0, halo_scale=15.0, toomre_q=1.5, proto=True),
-        description="A warm gas cloud that collapses into a disk."
+                      halo_mass=40.0, halo_scale=15.0, toomre_q=1.5, proto=True,
+                      halo_warmth=1.0,
+                      # initial-cloud morphology (Perlin/fBm) + kinematics (tunable)
+                      noise_pattern=0, noise_scale=1.0, noise_octaves=4,
+                      clump_sharpness=3.0, noise_seed=0, noise_frequency=1.0,
+                      noise_lacunarity=2.0, noise_persistence=0.5, noise_warp=0.0,
+                      rotation_frac=0.8, turbulence=40.0, radial_infall=0.0),
+        description=("A warm gas cloud that collapses into a disk. "
+                     "noise_pattern: 0=clumps 1=spiral 2=filaments 3=shells "
+                     "4=smooth. rotation_frac: 0=radial collapse, 1=spin-"
+                     "supported. turbulence/radial_infall in km/s-scale.")
     ),
     "gas_disk": ObjectTemplate(
         "gas_disk", "Gas disk", "galaxy", "gas",
@@ -125,7 +135,21 @@ def build_object(template: str, n: int, seed: int, params: dict | None = None):
             disk_mass=p["disk_mass"], disk_scale=p["disk_scale"], disk_height=p["disk_height"],
             gas_mass=p["gas_mass"], bulge_mass=p["bulge_mass"], bulge_scale=p["bulge_scale"],
             halo_mass=p["halo_mass"], halo_scale=p["halo_scale"],
-            toomre_q=p["toomre_q"], proto=p["proto"])
+            toomre_q=p["toomre_q"], proto=p["proto"],
+            halo_warmth=p.get("halo_warmth", 1.0),
+            gas_particle_frac=p.get("gas_particle_frac", 0.25),
+            noise_pattern=int(p.get("noise_pattern", 0)),
+            noise_scale=p.get("noise_scale", 1.0),
+            noise_octaves=int(p.get("noise_octaves", 4)),
+            clump_sharpness=p.get("clump_sharpness", 3.0),
+            noise_seed=int(p.get("noise_seed", 0)),
+            noise_frequency=p.get("noise_frequency", 1.0),
+            noise_lacunarity=p.get("noise_lacunarity", 2.0),
+            noise_persistence=p.get("noise_persistence", 0.5),
+            noise_warp=p.get("noise_warp", 0.0),
+            rotation_frac=p.get("rotation_frac", 0.8),
+            turbulence=p.get("turbulence", 40.0),
+            radial_infall=p.get("radial_infall", 0.0))
         from core.state import PTYPE_GAS, PTYPE_STAR, PTYPE_DM
         ptype = np.zeros(len(pos), dtype=np.int32)
         ptype[species == 0] = PTYPE_GAS
@@ -184,7 +208,9 @@ def compose_arrays(spec) -> dict:
             f"cannot compose objects of mixed engine kinds {sorted(kinds)} yet; "
             "all objects in a scene must share one kind (v1).")
     kind = kinds.pop()
-    needs_u = kind in ("gas", "impact")
+    # SPH-carrying kinds need per-particle internal energy u; "galaxy" (the live
+    # gas+stars+DM engine) does too -- without it the gas has no pressure/temp.
+    needs_u = kind in ("gas", "impact", "galaxy")
 
     pos_l, vel_l, mass_l, ptype_l, u_l = [], [], [], [], []
     for obj in spec.objects:
@@ -221,7 +247,6 @@ def build_scene(spec):
     kind, dt, soft = a["kind"], spec.dt, spec.softening
 
     if kind == "gravity":
-        import numpy as np
         from core.engine import Engine
         from core.state import State
         ids = np.arange(len(a["pos"]), dtype=np.int64)
@@ -246,7 +271,7 @@ def build_scene(spec):
         eng = LivingGalaxyEngine(
             pot=dict(M_d=0.0, a=1.0, b=1.0, M_h=0.0, a_h=1.0), softening=soft,
             gravity_mode="direct", theta=0.6,
-            sf_prob=0.03, du_sn=400.0)
+            eps_ff=0.01, du_sn=400.0)
         species = np.zeros(len(a["pos"]), dtype=np.int32)
         species[a["ptype"] == PTYPE_STAR] = 1
         species[a["ptype"] == PTYPE_DM] = 2

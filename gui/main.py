@@ -16,6 +16,7 @@ import sys
 import numpy as np
 
 from PyQt6.QtCore import QTimer, Qt, QObject, pyqtSignal
+from PyQt6.QtGui import QPainter, QColor, QPen
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
     QComboBox, QSpinBox, QPushButton, QLabel, QSlider, QCheckBox, QFormLayout,
@@ -35,6 +36,63 @@ _N_WARN = 50000  # above this, direct N^2 gravity gets slow
 # Brush "add" particle types -> core.state ptype codes (DM=0, star=1, gas=2).
 _PTYPE = {"Star": 1, "Gas": 2, "Dark matter": 0}
 _CLIP_KPC = 120.0  # matches sim_display: only pick what is actually drawn
+
+
+class Sparkline(QWidget):
+    """Tiny self-painted trend plot for a scalar diagnostic over time.
+
+    Keeps a rolling history and draws it as a line, with an optional reference
+    level (e.g. virial Q = 1) marked.  No external plotting dependency.
+    """
+
+    def __init__(self, label="", ref=None, lo=0.0, hi=2.0, maxlen=240, parent=None):
+        super().__init__(parent)
+        self.label, self.ref, self.lo, self.hi = label, ref, lo, hi
+        self._hist: list[float] = []
+        self._maxlen = maxlen
+        self.setMinimumHeight(46)
+
+    def clear(self):
+        self._hist.clear(); self.update()
+
+    def push(self, value):
+        if value is None:
+            return
+        self._hist.append(float(value))
+        if len(self._hist) > self._maxlen:
+            self._hist = self._hist[-self._maxlen:]
+        self.update()
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+        p.fillRect(0, 0, w, h, QColor(20, 22, 28))
+        lo, hi = self.lo, self.hi
+        if self._hist:
+            lo = min(lo, min(self._hist)); hi = max(hi, max(self._hist))
+        span = (hi - lo) or 1.0
+
+        def y_of(v):
+            return h - 4 - (v - lo) / span * (h - 8)
+
+        if self.ref is not None and lo <= self.ref <= hi:
+            p.setPen(QPen(QColor(90, 90, 110), 1, Qt.PenStyle.DashLine))
+            yr = int(y_of(self.ref))
+            p.drawLine(0, yr, w, yr)
+        if len(self._hist) >= 2:
+            p.setPen(QPen(QColor(90, 200, 255), 1))
+            n = len(self._hist)
+            for i in range(1, n):
+                x0 = int((i - 1) / (n - 1) * (w - 1))
+                x1 = int(i / (n - 1) * (w - 1))
+                p.drawLine(x0, int(y_of(self._hist[i - 1])),
+                           x1, int(y_of(self._hist[i])))
+        p.setPen(QColor(180, 185, 195))
+        txt = self.label
+        if self._hist:
+            txt += "  %.2f" % self._hist[-1]
+        p.drawText(4, 13, txt)
+        p.end()
 
 
 class MainWindow(QMainWindow):
@@ -278,15 +336,24 @@ class MainWindow(QMainWindow):
         self.anim_btn.clicked.connect(self._on_open_blender_animation)
         self.quick_btn = QPushButton("Quick render (headless)")
         self.quick_btn.clicked.connect(self._on_quick_render)
+        # Dark matter dominates the particle count and can bury the visible
+        # galaxy; let the user hide it in the live viewport.
+        self.show_dm_check = QCheckBox("Show dark matter")
+        self.show_dm_check.setChecked(True)
+        self.show_dm_check.toggled.connect(lambda _c: self._refresh_view())
         rl.addWidget(self.blender_btn)
         rl.addWidget(self.anim_btn)
         rl.addWidget(self.quick_btn)
+        rl.addWidget(self.show_dm_check)
         v.addWidget(rbox)
 
         v.addStretch(1)
         self.stats_label = QLabel("")
         self.stats_label.setStyleSheet("font-family: monospace; font-size: 11px;")
         v.addWidget(self.stats_label)
+        # Live virial-Q trend (Q=1 = equilibrium reference line).
+        self.virial_plot = Sparkline("virial Q", ref=1.0, lo=0.0, hi=2.0)
+        v.addWidget(self.virial_plot)
         self.status_label = QLabel("press Build")
         self.status_label.setWordWrap(True)
         v.addWidget(self.status_label)
@@ -378,6 +445,7 @@ class MainWindow(QMainWindow):
         self.ctrl.s.n = self.n_spin.value()
         self._set_status(self.ctrl.build())
         self.run_btn.setText("Run")
+        self.virial_plot.clear()
         self.timeline.follow_live()
         self._refresh_timeline()
         self._refresh_view()
@@ -621,7 +689,8 @@ class MainWindow(QMainWindow):
         self._refresh_stats()
 
     def _refresh_view(self):
-        pos, rgba = self.ctrl.display_arrays()
+        show_dm = self.show_dm_check.isChecked()
+        pos, rgba = self.ctrl.display_arrays(show_dm=show_dm)
         self.viewport.set_points(pos, rgba)
 
     def _refresh_stats(self):
@@ -632,9 +701,45 @@ class MainWindow(QMainWindow):
                  f"N        : {st['n']:,}"]
         if st.get("energy") is not None:
             lines.append(f"energy   : {st['energy']:.4g}")
-        if "stars" in st:
+        if st.get("virial") is not None:
+            # 2(KE+U_th)/|PE|: <1 collapsing, ~1 in equilibrium, >1 unbound.
+            lines.append(f"virial Q : {st['virial']:.3f}")
+        if st.get("thermal") is not None and st["thermal"] > 0.0:
+            lines.append(f"thermal  : {st['thermal']:.4g}")
+        if st.get("substeps") is not None:
+            lines.append(f"substeps : {st['substeps']}")
+        if st.get("toomre_q") is not None:
+            # <1 unstable, 1-2 spiral/bar-forming, >>2 featureless.
+            lines.append(f"Toomre Q : {st['toomre_q']:.2f}")
+        if st.get("v_rot") is not None:
+            lines.append(f"v_rot(8) : {st['v_rot']:.0f} km/s")
+        if st.get("smbh_mass") is not None:
+            lines.append(f"SMBH M   : {st['smbh_mass']:.4g}")
+        # --- Gas / Stars block ---
+        if st.get("gas_count") is not None:
+            lines.append("--- gas / stars ---")
+            lines.append(f"gas      : {st['gas_count']:,}  (M={st.get('gas_mass', 0):.3g})")
+            lines.append(f"stars    : {st.get('star_count', st.get('stars', 0)):,}"
+                         f"  (M={st.get('star_mass', 0):.3g})")
+            if st.get("gas_fraction") is not None:
+                lines.append(f"gas frac : {st['gas_fraction']:.3f}")
+            if st.get("sfr") is not None:
+                lines.append(f"SFR      : {st['sfr']:.3g}")
+            if st.get("gas_metal") is not None:
+                lines.append(f"Z(gas)   : {st['gas_metal']:.4f}")
+        elif "stars" in st:
             lines.append(f"stars    : {st['stars']:,}")
+        # --- Event counters ---
+        if st.get("n_sn") is not None:
+            ev = (f"SNe {st.get('n_sn', 0):,}  hyper {st.get('n_hypernova', 0):,}"
+                  f"  BH {st.get('n_bh_formed', 0):,}")
+            if st.get("n_ejected"):
+                ev += f"  ejected {st['n_ejected']:,}"
+            lines.append("--- events ---")
+            lines.append(ev)
         self.stats_label.setText("\n".join(lines))
+        if self.ctrl.s.running:
+            self.virial_plot.push(st.get("virial"))
 
     def _set_status(self, text: str):
         self.status_label.setText(text)
